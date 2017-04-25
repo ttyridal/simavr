@@ -22,6 +22,7 @@ simavr = ../
 IPATH = .
 IPATH += ${simavr}/include
 IPATH += ${simavr}/simavr/sim
+IPATH += ${simavr}/simavr/
 
 VPATH = src
 
