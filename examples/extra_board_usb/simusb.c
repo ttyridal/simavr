@@ -35,10 +35,10 @@
 #include "sim_elf.h"
 #include "sim_hex.h"
 #include "sim_gdb.h"
-#include "vhci_usb.h"
+#include "usbip.h"
 #include "sim_vcd_file.h"
 
-struct vhci_usb_t vhci_usb;
+struct usbip_t * usbip;
 avr_t * avr = NULL;
 avr_vcd_t vcd_file;
 
@@ -89,7 +89,6 @@ void avr_special_deinit( avr_t* avr, void *data)
 
 int main(int argc, char *argv[])
 {
-//		elf_firmware_t f;
 	const char * pwd = dirname(argv[0]);
 	struct avr_flash flash_data;
 
@@ -136,11 +135,19 @@ int main(int argc, char *argv[])
 		avr_gdb_init(avr);
 	}
 
-	vhci_usb_init(avr, &vhci_usb);
-	vhci_usb_connect(&vhci_usb, '0');
+    usbip = usbip_create(avr);
+    if (!usbip) {
+        fprintf(stderr, "usbip_create failed\n");
+        exit(1);
+    }
+	pthread_t usb_thread;
+	pthread_create(&usb_thread, NULL, usbip_main, usbip);
+
+// 	vhci_usb_connect(&vhci_usb, '0');
 
 
 	while (1) {
 		avr_run(avr);
 	}
+    usbip_destroy(usbip);
 }

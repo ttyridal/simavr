@@ -23,8 +23,6 @@ simavr = ../../
 
 IPATH = .
 IPATH += ../parts
-IPATH += ../vhci/include
-IPATH += ../vhci
 IPATH += ${simavr}/include
 IPATH += ${simavr}/simavr/sim
 #IPATH += /usr/local/include
@@ -32,7 +30,7 @@ IPATH += ${simavr}/simavr/sim
 VPATH = .
 VPATH += ../parts
 
-LDFLAGS += -lpthread -lusb_vhci -L../vhci/lib
+LDFLAGS += -lpthread
 
 all: obj ${firmware} ${target}
 
@@ -40,22 +38,11 @@ include ${simavr}/Makefile.common
 
 board = ${OBJ}/${target}.elf
 
-${board} : ${OBJ}/vhci_usb.o
+${board} : ${OBJ}/usbip.o
 ${board} : ${OBJ}/${target}.o
 
-../vhci/lib/libusb_vhci.a:
-	@echo -n "BUILDIN $@ "
-	@{ export CC=;export CFLAGS=; $(MAKE) -j -C ../vhci >/tmp/vhci.build.log 2>&1 || \
-		{ echo "ERROR check /tmp/vhci.build.log"; exit 1; }; } && \
-			echo " Done" 
-
-vhci : ../vhci/lib/libusb_vhci.a 
-
-clean-vhci:
-	$(MAKE) -C ../vhci clean
-
-${target}: vhci ${board}
+${target}: ${board}
 	@echo $@ done
 
-clean: clean-${OBJ} clean-vhci
+clean: clean-${OBJ}
 	rm -rf *.a *.axf *.hex ${target} *.vcd
