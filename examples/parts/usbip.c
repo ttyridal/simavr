@@ -19,16 +19,16 @@
 	along with simavr.  If not, see <http://www.gnu.org/licenses/>.
 
 
-    This code is heavily inspired by
-    https://github.com/lcgamboa/USBIP-Virtual-USB-Device
-    Copyright (c) : 2016  Luis Claudio Gambôa Lopes
+	This code is heavily inspired by
+	https://github.com/lcgamboa/USBIP-Virtual-USB-Device
+	Copyright (c) : 2016  Luis Claudio GambÃ´a Lopes
  */
 
 /*
-	this avrsim part is an usb connection between an usb AVR and the usbip virtual
-	host controller - making your sim-avr connect as a real
-	usb device to the developer machine.
-
+	this avrsim part will make your avr available as a usbip device.
+	To connect it to the host system load modules usbip-core and vhci-hcd,
+	then:
+	~# usbip attach -r 127.0.0.1 -b 1-1
 */
 
 /* TODO iso endpoint support */
@@ -42,12 +42,135 @@
 #include <unistd.h>
 #include <assert.h>
 
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+
+#define USBIP_PORT_NUM 3240
+
+#include "usb_types.h"
+#include "usbip_types.h"
+
 #include "avr_usb.h"
 
 struct usbip_t {
     struct avr_t * avr;
     bool attached;
+    bool udev_valid;
+	struct usbip_usb_device udev;
 };
+
+static int
+control_read(
+        const struct usbip_t * p,
+        byte reqtype,
+        byte req,
+        word wValue,
+        word wIndex,
+        word wLength,
+        byte * data)
+{
+    static const struct usb_endpoint control_ep = {0, 8};
+	int ret;
+	struct usb_setup_pkt buf = {
+        reqtype | USB_REQTYPE_DIR_DEV_TO_HOST,
+        req,
+        wValue,
+        wIndex,
+        wLength };
+	struct avr_io_usb pkt = { control_ep.epnum, sizeof buf, (uint8_t*) &buf };
+
+	avr_ioctl(p->avr, AVR_IOCTL_USB_SETUP, &pkt);
+
+	pkt.sz = control_ep.epsz;
+	pkt.buf = data;
+	while (wLength) {
+		usleep(2000);
+		switch (avr_ioctl(p->avr, AVR_IOCTL_USB_READ, &pkt)) {
+			case AVR_IOCTL_USB_NAK:
+				printf(" NAK\n");
+				usleep(50000);
+				continue;
+			case AVR_IOCTL_USB_STALL:
+				printf(" STALL\n");
+				return AVR_IOCTL_USB_STALL;
+            case 0: break;
+			default:
+				fprintf(stderr, "Unknown avr_ioctl return value\n");
+				abort();
+		}
+		pkt.buf += pkt.sz;
+		wLength -= pkt.sz;
+	}
+	wLength = pkt.buf - data;
+
+	usleep(1000);
+	pkt.sz = 0;
+	while ((ret = avr_ioctl(p->avr, AVR_IOCTL_USB_WRITE, &pkt)) == AVR_IOCTL_USB_NAK)
+		usleep(50000);
+	assert(!ret);
+
+	return wLength;
+}
+
+static bool
+get_descriptor(
+        const struct usbip_t * p,
+        unsigned char descr_type,
+        void * buf,
+        size_t length)
+{
+    const unsigned char descr_index = 0;
+    return control_read(p,
+            USB_REQTYPE_STD + USB_REQTYPE_DEVICE,
+            USB_REQUEST_GET_DESCRIPTOR,
+            descr_type << 8 | descr_index,
+            0,
+            length,
+            buf) == (int)length;
+}
+
+static bool
+load_device_and_config_descriptor(
+        struct usbip_t * p)
+{
+    if (p->udev_valid)
+        return true;
+
+    struct usb_device_descriptor dd;
+    struct usb_configuration_descriptor cd;
+    if (!get_descriptor(p, USB_DESCRIPTOR_DEVICE, &dd, sizeof dd)) {
+        fprintf(stderr, "get device descriptor failed\n");
+        p->udev_valid = false;
+        return false;
+    }
+
+    if (!get_descriptor(p, USB_DESCRIPTOR_CONFIGURATION, &cd, sizeof cd)) {
+        fprintf(stderr, "get configuration descriptor failed\n");
+        p->udev_valid = false;
+        return false;
+    }
+
+    strcpy(p->udev.path, "/sys/devices/pci0000:00/0000:00:01.2/usb1/1-1");
+    strcpy(p->udev.busid, "1-1");
+    p->udev.busnum = htonl(1);
+    p->udev.devnum = htonl(2);
+    p->udev.speed = htonl(2);
+
+	p->udev.idVendor = htons(dd.idVendor);
+	p->udev.idProduct = htons(dd.idProduct);
+	p->udev.bcdDevice = htons(dd.bcdDevice);
+
+	p->udev.bDeviceClass = dd.bDeviceClass;
+	p->udev.bDeviceSubClass = dd.bDeviceSubClass;
+	p->udev.bDeviceProtocol = dd.bDeviceProtocol;
+	p->udev.bConfigurationValue = cd.bConfigurationValue;
+	p->udev.bNumConfigurations = dd.bNumConfigurations;
+	p->udev.bNumInterfaces = cd.bNumInterfaces;
+
+    p->udev_valid = true;
+    return true;
+}
 
 
 static void
@@ -59,74 +182,12 @@ vhci_usb_attach_hook(
     struct usbip_t * p = param;
 	p->attached = !!value;
 	printf("avr attached: %d\n", p->attached);
+
+    avr_ioctl(p->avr, AVR_IOCTL_USB_VBUS, (void*) 1);
+
     (void)irq;
 }
 #if 0
-struct usbsetup {
-uint8_t reqtype; uint8_t req; uint16_t wValue; uint16_t wIndex; uint16_t wLength;
-}__attribute__((__packed__));
-
-struct _ep {
-	uint8_t epnum;
-	uint8_t epsz;
-};
-
-char * setuprequests[] =
-	{ "GET_STATUS", "CLEAR_FEAT", "", "SET_FEAT", "", "SET_ADDR", "GET_DESCR",
-	        "SET_DESCR", "GET_CONF", "SET_CONF" };
-
-static int
-control_read(
-        struct vhci_usb_t * p,
-        struct _ep * ep,
-        uint8_t reqtype,
-        uint8_t req,
-        uint16_t wValue,
-        uint16_t wIndex,
-        uint16_t wLength,
-        uint8_t * data)
-{
-	assert(reqtype&0x80);
-	int ret;
-	struct usbsetup buf =
-		{ reqtype, req, wValue, wIndex, wLength };
-	struct avr_io_usb pkt =
-		{ ep->epnum, sizeof(struct usbsetup), (uint8_t*) &buf };
-
-	avr_ioctl(p->avr, AVR_IOCTL_USB_SETUP, &pkt);
-
-	pkt.sz = wLength;
-	pkt.buf = data;
-	while (wLength) {
-		usleep(1000);
-		ret = avr_ioctl(p->avr, AVR_IOCTL_USB_READ, &pkt);
-		if (ret == AVR_IOCTL_USB_NAK) {
-			printf(" NAK\n");
-			usleep(50000);
-			continue;
-		}
-		if (ret == AVR_IOCTL_USB_STALL) {
-			printf(" STALL\n");
-			return ret;
-		}
-		assert(ret==0);
-		pkt.buf += pkt.sz;
-		if (ep->epsz != pkt.sz)
-			break;
-		wLength -= pkt.sz;
-		pkt.sz = wLength;
-	}
-	wLength = pkt.buf - data;
-
-	usleep(1000);
-	pkt.sz = 0;
-	while ((ret = avr_ioctl(p->avr, AVR_IOCTL_USB_WRITE, &pkt))
-	        == AVR_IOCTL_USB_NAK) {
-		usleep(50000);
-	}
-	assert(ret==0);
-	return wLength;
-}
 
 static int
 control_write(
@@ -233,19 +294,6 @@ handle_status_change(
 		printf("port disabled\n");
 
 	*prev = *curr;
-}
-
-static int
-get_ep0_size(
-		struct vhci_usb_t * p)
-{
-	struct _ep ep0 =
-		{ 0, 8 };
-	uint8_t data[8];
-
-	int res = control_read(p, &ep0, 0x80, 6, 1 << 8, 0, 8, data);
-	assert(res==8);
-	return data[7];
 }
 
 static void
@@ -399,12 +447,146 @@ vhci_usb_thread(
 }
 #endif
 
+static int
+open_usbip_socket(
+        void)
+{
+	struct sockaddr_in serv;
+	int listenfd;
+
+	if ((listenfd = socket(PF_INET, SOCK_STREAM, 0)) < 0) {
+		perror("socket error");
+		exit (1);
+	};
+
+	int reuse = 1;
+	if (setsockopt(
+				listenfd,
+				SOL_SOCKET,
+				SO_REUSEADDR,
+				(const char*)&reuse,
+				sizeof(reuse)) < 0)
+		perror("setsockopt(SO_REUSEADDR) failed");
+
+	memset(&serv, 0, sizeof serv);
+	serv.sin_family = AF_INET;
+	serv.sin_addr.s_addr = htonl(INADDR_ANY);
+	serv.sin_port = htons(USBIP_PORT_NUM);
+
+	if (bind(listenfd, (struct sockaddr *)&serv, sizeof serv) < 0) {
+		perror("bind error");
+		exit (1);
+	}
+
+	if (listen(listenfd, SOMAXCONN) < 0) {
+		perror("listen error");
+		exit (1);
+	}
+
+	return listenfd;
+}
+
+
+static void
+handle_usbip_req_devlist(int sockfd, struct usbip_t * p) {
+    struct usbip_op_common op_common = {
+        htons(USBIP_PROTO_VERSION),
+        htons(USBIP_OP_REPLY | USBIP_OP_DEVLIST),
+        htonl(USBIP_ST_NA)
+    };
+    struct usbip_op_devlist_reply devlist = {htonl(1)};
+
+
+    avr_ioctl(p->avr, AVR_IOCTL_USB_RESET, NULL);
+    usleep(2500);
+
+    load_device_and_config_descriptor(p);
+
+    // get config AND interface descriptors
+    struct {
+        struct usb_configuration_descriptor config;
+        struct usb_interface_descriptor interf[p->udev.bNumInterfaces];
+    } cd;
+    if (!get_descriptor(p, USB_DESCRIPTOR_CONFIGURATION, &cd, sizeof cd)) {
+        fprintf(stderr, "get configuration descriptor failed\n");
+        if (send(sockfd, &op_common, sizeof op_common, 0) != sizeof op_common)
+            perror("sock send");
+        return;
+    }
+
+    ssize_t devinfo_sz = sizeof (struct usbip_usb_device) +
+                        devinfo->udev.bNumInterfaces * sizeof (struct usbip_usb_interface);
+    struct usbip_op_devlist_reply_extra * devinfo = malloc(devinfo_sz);
+
+    devinfo->udev = p->udev;
+
+    for (byte i=0; i < devinfo->udev.bNumInterfaces; i++) {
+        devinfo->uinf[i].bInterfaceClass = cd.interf[i].bInterfaceClass;
+        devinfo->uinf[i].bInterfaceSubClass = cd.interf[i].bInterfaceSubClass;
+        devinfo->uinf[i].bInterfaceProtocol = cd.interf[i].bInterfaceProtocol;
+        devinfo->uinf[i].padding = 0;
+    }
+
+    op_common.status = htonl(USBIP_ST_OK);
+
+#define sock_send(sockfd, dta, dta_sz) if(send(sockfd, dta, dta_sz, 0) != dta_sz) { perror("sock send"); break; }
+    do {
+        sock_send(sockfd, &op_common, sizeof op_common)
+        sock_send(sockfd, &devlist, sizeof devlist)
+        sock_send(sockfd, devinfo, devinfo_sz)
+    } while (0);
+#undef sock_send
+
+    free(devinfo);
+}
+
+
+static void
+handle_usbip_connection(int sockfd, struct usbip_t * p) {
+	while (1) {
+		struct usbip_op_common op_common;
+		ssize_t nb = recv(sockfd, &op_common, sizeof op_common, 0);
+		if (nb != sizeof op_common)
+			return;
+		unsigned version = ntohs(op_common.version);
+		unsigned op_code = ntohs(op_common.code);
+		if (version != USBIP_PROTO_VERSION) {
+			fprintf(stderr, "Protocol version mismatch, request: %x, this: %x\n",
+					version, USBIP_PROTO_VERSION);
+			return;
+		}
+		switch (op_code) {
+			case USBIP_OP_REQUEST | USBIP_OP_DEVLIST:
+                handle_usbip_req_devlist(sockfd, p);
+				break;
+			default:
+				fprintf(stderr, "Unknown usbip %s %x\n",
+						op_code & USBIP_OP_REQUEST ? "request" : "reply",
+						op_code & 0xff);
+				return;
+		}
+	}
+}
+
 void *
 usbip_main(
 		struct usbip_t * p)
 {
+	int listenfd = open_usbip_socket();
+	struct sockaddr_in cli;
+	unsigned int clilen = sizeof(cli);
+	int sockfd = accept(listenfd, (struct sockaddr *)&cli,  &clilen);
+
+	if ( sockfd < 0) {
+		printf ("accept error : %s \n", strerror (errno));
+		exit (1);
+	}
+	fprintf(stderr, "Connection address:%s\n",inet_ntoa(cli.sin_addr));
+	handle_usbip_connection(sockfd, p);
+	close(sockfd);
+
 (void)p;
-    return NULL;
+	return NULL;
 }
 
 
@@ -412,30 +594,20 @@ struct usbip_t *
 usbip_create(
 		struct avr_t * avr)
 {
-    struct usbip_t * p = malloc(sizeof &p);
+	struct usbip_t * p = malloc(sizeof *p);
+    memset(p, 0, sizeof *p);
 	p->avr = avr;
 
 
-	avr_irq_t * t = avr_io_getirq(p->avr, AVR_IOCTL_USB_GETIRQ(),
-	        USB_IRQ_ATTACH);
+	avr_irq_t * t = avr_io_getirq(p->avr, AVR_IOCTL_USB_GETIRQ(), USB_IRQ_ATTACH);
 	avr_irq_register_notify(t, vhci_usb_attach_hook, p);
 
-    return p;
+	return p;
 }
 
 void
 usbip_destroy(
-        void * p)
+	void * p)
 {
-    free(p);
+	free(p);
 }
-
-// void
-// vhci_usb_connect(
-// 		struct vhci_usb_t * p,
-// 		char uart)
-// {
-// 	avr_irq_t * t = avr_io_getirq(p->avr, AVR_IOCTL_USB_GETIRQ(),
-// 	        USB_IRQ_ATTACH);
-// 	avr_irq_register_notify(t, vhci_usb_attach_hook, p);
-// }
