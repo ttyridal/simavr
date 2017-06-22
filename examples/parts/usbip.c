@@ -25,13 +25,11 @@
  */
 
 /*
-	this avrsim part will make your avr available as a usbip device.
+	this avrsim part will expose your usb-avr as a usbip server.
 	To connect it to the host system load modules usbip-core and vhci-hcd,
 	then:
-	~# usbip attach -r 127.0.0.1 -b 1-1
+	~# usbip -a 127.0.0.1 1-1
 */
-
-/* TODO iso endpoint support */
 
 #include <pthread.h>
 #include <string.h>
@@ -60,6 +58,75 @@ struct usbip_t {
 	struct usbip_usb_device udev;
 };
 
+static ssize_t
+avr_usb_read(
+    const struct usbip_t * p,
+    struct usb_endpoint ep,
+    void * buf,
+    size_t blen)
+{
+    byte * b = buf;
+    struct avr_io_usb pkt = { ep.epnum, blen > ep.epsz ? ep.epsz : blen, b };
+    if (buf) {
+        while (blen) {
+            printf("loop read blen: %zu ep.epsz:%d\n", blen, pkt.sz);
+            usleep(2000);
+            switch (avr_ioctl(p->avr, AVR_IOCTL_USB_READ, &pkt)) {
+                case AVR_IOCTL_USB_NAK:
+                    printf(" NAK\n");
+                    return pkt.buf - b;
+                case AVR_IOCTL_USB_STALL:
+                    printf(" STALL\n");
+                    return -1;
+                case 0:
+                    if (!pkt.sz)
+                        blen = 0;
+                    break;
+                default:
+                    fprintf(stderr, "Unknown avr_ioctl return value\n");
+                    abort();
+            }
+            pkt.buf += pkt.sz;
+            blen -= pkt.sz;
+        }
+        return pkt.buf - b;
+    } else {
+        int ret;
+        while ((ret = avr_ioctl(p->avr, AVR_IOCTL_USB_READ, &pkt))
+                == AVR_IOCTL_USB_NAK) {
+            usleep(50000);
+        }
+        return 0;
+    }
+}
+
+static int
+avr_usb_write(
+    const struct usbip_t * p,
+    struct usb_endpoint ep,
+    void * buf,
+    size_t blen)
+{
+	struct avr_io_usb pkt = { ep.epnum, blen > ep.epsz ? ep.epsz : blen, buf };
+    do {
+        switch (avr_ioctl(p->avr, AVR_IOCTL_USB_WRITE, &pkt)) {
+            case 0: break;
+            case AVR_IOCTL_USB_NAK:
+                usleep(50000);
+                continue;
+            case AVR_IOCTL_USB_STALL:
+                printf(" STALL\n");
+                return -1;
+            default:
+                fprintf(stderr, "Unknown avr_ioctl return\n");
+                abort();
+        }
+        pkt.buf += pkt.sz;
+        pkt.sz = (blen > ep.epsz ? ep.epsz : blen);
+    } while (pkt.buf != buf + blen);
+    return 0;
+}
+
 static int
 control_read(
         const struct usbip_t * p,
@@ -80,37 +147,16 @@ control_read(
         wLength };
 	struct avr_io_usb pkt = { control_ep.epnum, sizeof buf, (uint8_t*) &buf };
 
+    printf("ctrl_read %d %d %04x  %d bytes %zu\n", reqtype, req, wValue, wLength, sizeof buf);
 	avr_ioctl(p->avr, AVR_IOCTL_USB_SETUP, &pkt);
 
-	pkt.sz = control_ep.epsz;
-	pkt.buf = data;
-	while (wLength) {
-		usleep(2000);
-		switch (avr_ioctl(p->avr, AVR_IOCTL_USB_READ, &pkt)) {
-			case AVR_IOCTL_USB_NAK:
-				printf(" NAK\n");
-				usleep(50000);
-				continue;
-			case AVR_IOCTL_USB_STALL:
-				printf(" STALL\n");
-				return AVR_IOCTL_USB_STALL;
-            case 0: break;
-			default:
-				fprintf(stderr, "Unknown avr_ioctl return value\n");
-				abort();
-		}
-		pkt.buf += pkt.sz;
-		wLength -= pkt.sz;
-	}
-	wLength = pkt.buf - data;
+    ret = avr_usb_read(p, control_ep, data, wLength);
 
 	usleep(1000);
-	pkt.sz = 0;
-	while ((ret = avr_ioctl(p->avr, AVR_IOCTL_USB_WRITE, &pkt)) == AVR_IOCTL_USB_NAK)
-		usleep(50000);
-	assert(!ret);
 
-	return wLength;
+    avr_usb_write(p, control_ep, NULL, 0);
+
+    return ret;
 }
 
 static bool
@@ -134,8 +180,8 @@ static bool
 load_device_and_config_descriptor(
         struct usbip_t * p)
 {
-    if (p->udev_valid)
-        return true;
+//     if (p->udev_valid)
+//         return true;
 
     struct usb_device_descriptor dd;
     struct usb_configuration_descriptor cd;
@@ -447,6 +493,26 @@ vhci_usb_thread(
 }
 #endif
 
+static int sock_read_exact(
+        int sockfd,
+        void * buf,
+        size_t n)
+{
+    while (n != 0) {
+        ssize_t nb = recv(sockfd, buf, n, 0);
+        if (nb == 0) {
+            fprintf(stderr, "disconnect\n");
+            return 1;
+        }
+        if (nb < 0) {
+            perror("sock_read_exact");
+            return -1;
+        }
+        n -= nb;
+    }
+    return 0;
+}
+
 static int
 open_usbip_socket(
         void)
@@ -487,6 +553,7 @@ open_usbip_socket(
 }
 
 
+#define sock_send(sockfd, dta, dta_sz) if(send(sockfd, dta, dta_sz, 0) != dta_sz) { perror("sock send"); break; }
 static void
 handle_usbip_req_devlist(int sockfd, struct usbip_t * p) {
     struct usbip_op_common op_common = {
@@ -515,7 +582,7 @@ handle_usbip_req_devlist(int sockfd, struct usbip_t * p) {
     }
 
     ssize_t devinfo_sz = sizeof (struct usbip_usb_device) +
-                        devinfo->udev.bNumInterfaces * sizeof (struct usbip_usb_interface);
+                         p->udev.bNumInterfaces * sizeof (struct usbip_usb_interface);
     struct usbip_op_devlist_reply_extra * devinfo = malloc(devinfo_sz);
 
     devinfo->udev = p->udev;
@@ -529,42 +596,190 @@ handle_usbip_req_devlist(int sockfd, struct usbip_t * p) {
 
     op_common.status = htonl(USBIP_ST_OK);
 
-#define sock_send(sockfd, dta, dta_sz) if(send(sockfd, dta, dta_sz, 0) != dta_sz) { perror("sock send"); break; }
     do {
         sock_send(sockfd, &op_common, sizeof op_common)
         sock_send(sockfd, &devlist, sizeof devlist)
         sock_send(sockfd, devinfo, devinfo_sz)
     } while (0);
-#undef sock_send
 
     free(devinfo);
 }
 
+static int
+handle_usbip_detached_state(
+        int sockfd,
+        struct usbip_t * p)
+{
+    struct usbip_op_common op_common;
+    if (sock_read_exact(sockfd, &op_common, sizeof op_common))
+        return -1;
+    unsigned version = ntohs(op_common.version);
+    unsigned op_code = ntohs(op_common.code);
+
+    if (version != USBIP_PROTO_VERSION) {
+        fprintf(stderr, "Protocol version mismatch, request: %x, this: %x\n",
+                version, USBIP_PROTO_VERSION);
+        return -1;
+    }
+    printf("executing %d\n", op_code);
+    switch (op_code) {
+        case USBIP_OP_REQUEST | USBIP_OP_DEVLIST:
+            handle_usbip_req_devlist(sockfd, p);
+            break;
+        case USBIP_OP_REQUEST | USBIP_OP_IMPORT: {
+            struct usbip_op_import_request req;
+            if (recv(sockfd, &req, sizeof req, 0) != sizeof req) {
+                fprintf(stderr, "protocol vialation\n");
+                return -1;
+            }
+
+            avr_ioctl(p->avr, AVR_IOCTL_USB_RESET, NULL);
+            usleep(2500);
+
+
+            if (!load_device_and_config_descriptor(p)) {
+                printf("Failed load_Decice_And_config while attach\n");
+                op_common.status = USBIP_ST_NA;
+                if (send(sockfd, &op_common, sizeof op_common, 0) != sizeof op_common)
+                    perror("sock send");
+            } else {
+                op_common.code = htons(USBIP_OP_REPLY | USBIP_OP_IMPORT),
+                op_common.status = USBIP_ST_OK;
+                struct usbip_op_import_reply reply = { p->udev };
+                do {
+                    sock_send(sockfd, &op_common, sizeof op_common)
+                    sock_send(sockfd, &reply, sizeof reply)
+                } while(0);
+            }
+            printf("Attached to usbip client\n");
+            return 1;
+        }
+        default:
+            fprintf(stderr, "Unknown usbip %s %x\n",
+                    op_code & USBIP_OP_REQUEST ? "request" : "reply",
+                    op_code & 0xff);
+            return -1;
+    }
+    return 0;
+}
 
 static void
-handle_usbip_connection(int sockfd, struct usbip_t * p) {
+handle_usbip_connection(
+        int sockfd,
+        struct usbip_t * p)
+{
+    bool attached = false;
 	while (1) {
-		struct usbip_op_common op_common;
-		ssize_t nb = recv(sockfd, &op_common, sizeof op_common, 0);
-		if (nb != sizeof op_common)
-			return;
-		unsigned version = ntohs(op_common.version);
-		unsigned op_code = ntohs(op_common.code);
-		if (version != USBIP_PROTO_VERSION) {
-			fprintf(stderr, "Protocol version mismatch, request: %x, this: %x\n",
-					version, USBIP_PROTO_VERSION);
-			return;
-		}
-		switch (op_code) {
-			case USBIP_OP_REQUEST | USBIP_OP_DEVLIST:
-                handle_usbip_req_devlist(sockfd, p);
-				break;
-			default:
-				fprintf(stderr, "Unknown usbip %s %x\n",
-						op_code & USBIP_OP_REQUEST ? "request" : "reply",
-						op_code & 0xff);
-				return;
-		}
+        if (attached) {
+            struct usbip_header cmd;
+            if (sock_read_exact(sockfd, &cmd, sizeof cmd.hdr))
+                return;
+
+            byte ep = ntohl(cmd.hdr.ep);
+            int cmdnum = ntohl(cmd.hdr.command);
+            int direction = ntohl(cmd.hdr.direction);
+
+            printf("Got command: %d seq: %d  devid: %d  ep: %d %s\n",
+                    cmdnum,
+                    ntohl(cmd.hdr.seqnum),
+                    ntohl(cmd.hdr.devid),
+                    ep,
+                    direction == USBIP_DIR_IN ? "in" : "out");
+
+            switch (cmdnum) {
+                case USBIP_CMD_SUBMIT: {
+                    if (sock_read_exact(sockfd, &cmd.u.submit, sizeof cmd.u.submit))
+                        return;
+                    ssize_t bl = ntohl(cmd.u.submit.transfer_buffer_length);
+                    byte buf[bl];
+                    struct usb_endpoint endpoint = {ep,8};
+
+                    if (ep == 0) {
+                        printf("submit_setup\n    reqType:%x\n    req: %x\n    val: %04x\n    idx: %d\n    wLength: %d\n    bl: %zu\n",
+                                cmd.u.submit.setup[0],
+                                cmd.u.submit.setup[1],
+                                (cmd.u.submit.setup[3] << 8) + cmd.u.submit.setup[2],
+                                (cmd.u.submit.setup[5] << 8) + cmd.u.submit.setup[4],
+                                (cmd.u.submit.setup[7] << 8) + cmd.u.submit.setup[6],
+                                bl);
+
+
+                        struct avr_io_usb pkt = { ep, sizeof cmd.u.submit.setup, cmd.u.submit.setup };
+                        avr_ioctl(p->avr, AVR_IOCTL_USB_SETUP, &pkt);
+                        printf("data phase\n");
+                    } else {
+                        printf("submit\n    flags: %x\n    start_Frame: %d\n    num_of_pkts: %d\n    interval: %d\n    bl: %zu\n",
+                                ntohl(cmd.u.submit.transfer_flags),
+                                ntohl(cmd.u.submit.start_frame),
+                                cmd.u.submit.number_of_packets,
+                                cmd.u.submit.interval,
+                                bl);
+                    }
+
+                    if (direction == USBIP_DIR_IN) {
+                        if (bl)
+                            bl = avr_usb_read(p, endpoint, buf, bl);
+                        if (ep == 0) {
+                            printf("data phase 2\n");
+                            usleep(30000);
+                            avr_usb_write(p, endpoint, NULL, 0);
+                        }
+                    } else {
+                        if (bl && sock_read_exact(sockfd, buf, bl))
+                            return;
+                        if (bl)
+                            bl = avr_usb_write(p, endpoint, buf, bl);
+                        if (ep == 0) {
+                            printf("data phase 2\n");
+                            usleep(2000);
+                            avr_usb_read(p, endpoint, NULL, 0);
+                        }
+                    }
+
+
+                    struct usbip_header ret;
+                    ret.hdr = cmd.hdr;
+                    ret.hdr.command = htonl(USBIP_RET_SUBMIT);
+                    ret.hdr.direction = 0;
+                    ret.u.retsubmit.status = htonl(bl < 0 ? USBIP_ST_NA : USBIP_ST_OK);
+                    ret.u.retsubmit.actual_length = htonl(bl < 0 ? 0 : bl);
+                    ret.u.retsubmit.start_frame = 0;
+                    ret.u.retsubmit.number_of_packets = 0;
+                    ret.u.retsubmit.error_count = 0;
+                    memcpy(&ret.u.retsubmit.setup, cmd.u.submit.setup, 8);
+
+                    printf("return %zd bytes\n", bl);
+                    usleep(50000);
+                    if (send(sockfd, &ret, sizeof ret.hdr + sizeof ret.u.retsubmit, 0) != sizeof ret.hdr + sizeof ret.u.retsubmit)
+                        perror("sock send");
+                    if (bl>0 && send(sockfd, buf, bl, 0) != bl)
+                        perror("sock send");
+
+                    printf("done\n");
+
+
+                    break;
+                }
+                case USBIP_CMD_UNLINK:
+                    if (recv(sockfd, &cmd.u.unlink, sizeof cmd.u.unlink, 0) != sizeof cmd.u.unlink) {
+                        perror("sock_recv");
+                        return;
+                    }
+                    break;
+                default:
+                    fprintf(stderr, "protocol vialation, unknown command %x\n", ntohl(cmd.hdr.command));
+
+            }
+
+        } else {
+            switch (handle_usbip_detached_state(sockfd, p)) {
+                case -1: return;
+                case 1:
+                    attached = true;
+                default:
+                break;
+            }
+        }
 	}
 }
 
@@ -575,15 +790,18 @@ usbip_main(
 	int listenfd = open_usbip_socket();
 	struct sockaddr_in cli;
 	unsigned int clilen = sizeof(cli);
-	int sockfd = accept(listenfd, (struct sockaddr *)&cli,  &clilen);
 
-	if ( sockfd < 0) {
-		printf ("accept error : %s \n", strerror (errno));
-		exit (1);
-	}
-	fprintf(stderr, "Connection address:%s\n",inet_ntoa(cli.sin_addr));
-	handle_usbip_connection(sockfd, p);
-	close(sockfd);
+    while (1) {
+        int sockfd = accept(listenfd, (struct sockaddr *)&cli,  &clilen);
+
+        if ( sockfd < 0) {
+            printf ("accept error : %s \n", strerror (errno));
+            exit (1);
+        }
+        fprintf(stderr, "Connection address:%s\n",inet_ntoa(cli.sin_addr));
+        handle_usbip_connection(sockfd, p);
+        close(sockfd);
+    }
 
 (void)p;
 	return NULL;
@@ -598,7 +816,6 @@ usbip_create(
     memset(p, 0, sizeof *p);
 	p->avr = avr;
 
-
 	avr_irq_t * t = avr_io_getirq(p->avr, AVR_IOCTL_USB_GETIRQ(), USB_IRQ_ATTACH);
 	avr_irq_register_notify(t, vhci_usb_attach_hook, p);
 
@@ -611,3 +828,4 @@ usbip_destroy(
 {
 	free(p);
 }
+#undef sock_send
