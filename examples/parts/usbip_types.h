@@ -122,11 +122,21 @@ struct usbip_ret_submit {
 
 struct usbip_cmd_unlink {
     int32_t seqnum_urb;
+    int32_t pad1;
+    int32_t pad2;
+    int32_t pad3;
+    int32_t pad4;
+    long long pad5;
 } __attribute__ ((__packed__));
 
 
 struct usbip_ret_unlink {
     int32_t status;
+    int32_t pad1;
+    int32_t pad2;
+    int32_t pad3;
+    int32_t pad4;
+    long long pad5;
 } __attribute__ ((__packed__));
 
 struct usbip_header {
@@ -135,5 +145,6 @@ struct usbip_header {
         struct usbip_cmd_submit submit;
         struct usbip_ret_submit retsubmit;
         struct usbip_cmd_unlink unlink;
+        struct usbip_ret_unlink retunlink;
     } u;
 } __attribute__ ((__packed__));
