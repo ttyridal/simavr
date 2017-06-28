@@ -421,6 +421,16 @@ avr_usb_uenum_write(
 	avr_core_watch_write(avr, addr, v);
 }
 
+static void
+avr_debug_Write(
+        struct avr_t * avr,
+        avr_io_addr_t addr,
+        uint8_t v,
+        void * param)
+{
+    printf("%c", v);
+}
+
 static uint8_t
 avr_usb_ep_read_ueintx(
         struct avr_t * avr,
@@ -780,6 +790,8 @@ void avr_usb_init(avr_t * avr, avr_usb_t * p)
 	avr_register_io_write(avr, p->r_usbcon + udaddr, avr_usb_udaddr_write, p);
 	avr_register_io_write(avr, p->r_usbcon + udcon, avr_usb_udcon_write, p);
 	avr_register_io_write(avr, p->r_usbcon + uenum, avr_usb_uenum_write, p);
+
+	avr_register_io_write(avr, 0x51, avr_debug_Write, p);
 
 	avr_register_io_read(avr, p->r_usbcon + uedatx, avr_usb_ep_read_data, p);
 	avr_register_io_write(avr, p->r_usbcon + uedatx, avr_usb_ep_write_data, p);
