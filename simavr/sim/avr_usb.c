@@ -31,6 +31,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <pthread.h>
 #include "avr_usb.h"
 
 enum usb_regs
@@ -148,6 +149,7 @@ struct _epstate {
 };
 
 struct usb_internal_state {
+	pthread_mutex_t mutex;
 	struct _epstate ep_state[5];
 	avr_int_vector_t com_vect;
 	avr_int_vector_t gen_vect;
@@ -569,9 +571,9 @@ avr_usb_ep_read_data(
 	if (ret < 0) {
 		if (ret == -2)
 			raise_ep_interrupt(avr, p, current_ep_to_cpu(p), underfi);
-		return 0;
-	} else
-		return (uint8_t) ret;
+		ret = 0;
+	}
+	return (uint8_t) ret;
 }
 
 static void
@@ -583,9 +585,6 @@ avr_usb_ep_write_data(
 {
 	avr_usb_t * p = (avr_usb_t *) param;
 	int ret = ep_fifo_cpu_writebyte(get_epstate(p, current_ep_to_cpu(p)), v);
-	if (ret == 0)
-		return;
-
 	if (ret == -2)
 		raise_ep_interrupt(avr, p, current_ep_to_cpu(p), overfi);
 }
@@ -781,6 +780,10 @@ void avr_usb_init(avr_t * avr, avr_usb_t * p)
 	p->io = _io;
 
 	p->state = calloc(1, sizeof *p->state);
+    if (pthread_mutex_init(&p->state->mutex, NULL)) {
+        printf("FATAL: avr_usb mutex init failed\n");
+        abort();
+    }
 
 	avr_register_io(avr, &p->io);
 	register_vectors(avr, p);
