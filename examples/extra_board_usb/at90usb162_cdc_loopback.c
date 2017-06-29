@@ -800,11 +800,9 @@ ISR(USB_COM_vect, ISR_BLOCK)
 		wLength |= (UEDATX << 8);
 		UEINTX = ~((1<<RXSTPI) | (1<<RXOUTI) | (1<<TXINI));
 		if (bRequest == GET_DESCRIPTOR) {
-            printf("avr: getDescr\n");
 			list = (const uint8_t *)descriptor_list;
 			for (i=0; ; i++) {
 				if (i >= NUM_DESC_LIST) {
-                    printf("avr: getDescrError %d > %d\n", i, NUM_DESC_LIST);
 					UECONX = (1<<STALLRQ)|(1<<EPEN);  //stall
 					return;
 				}
@@ -828,10 +826,12 @@ ISR(USB_COM_vect, ISR_BLOCK)
 			len = (wLength < 256) ? wLength : 255;
 			if (len > desc_length) len = desc_length;
 			do {
+                printf("avr:wait txini\n");
 				// wait for host ready for IN packet
 				do {
 					i = UEINTX;
 				} while (!(i & ((1<<TXINI)|(1<<RXOUTI))));
+                printf("avr: good %d\n", i & (1<<RXOUTI));
 				if (i & (1<<RXOUTI))
 				{
 					return;	// abort
@@ -844,19 +844,15 @@ ISR(USB_COM_vect, ISR_BLOCK)
 				len -= n;
 				usb_send_in();
 			} while (len || n == ENDPOINT0_SIZE);
-            printf("avr: getDescr done\n");
 			return;
 		}
 		if (bRequest == SET_ADDRESS) {
-            printf("avr: set_addr\n");
 			usb_send_in();
 			usb_wait_in_ready();
 			UDADDR = wValue | (1<<ADDEN);
-            printf("avr: set_addr done\n");
 			return;
 		}
 		if (bRequest == SET_CONFIGURATION && bmRequestType == 0) {
-            printf("avr: set_config\n");
 			usb_configuration = wValue;
 			cdc_line_rtsdtr = 0;
 			transmit_flush_timer = 0;
@@ -873,19 +869,15 @@ ISR(USB_COM_vect, ISR_BLOCK)
 			}
 				UERST = 0x1E;
 				UERST = 0;
-            printf("avr: set_config done\n");
 			return;
 		}
 		if (bRequest == GET_CONFIGURATION && bmRequestType == 0x80) {
-            printf("avr: getConfig\n");
 			usb_wait_in_ready();
 			UEDATX = usb_configuration;
 			usb_send_in();
-            printf("avr: getConfig done\n");
 			return;
 		}
 		if (bRequest == CDC_GET_LINE_CODING && bmRequestType == 0xA1) {
-            printf("avr: get lineCoding\n");
 			usb_wait_in_ready();
 			usb_wait_in_ready();
 			p = cdc_line_coding;
@@ -893,11 +885,9 @@ ISR(USB_COM_vect, ISR_BLOCK)
 				UEDATX = *p++;
 			}
 			usb_send_in();
-            printf("avr: get lineCoding done\n");
 			return;
 		}
 		if (bRequest == CDC_SET_LINE_CODING && bmRequestType == 0x21) {
-            printf("avr: set lineCoding\n");
 			usb_wait_receive_out();
 			p = cdc_line_coding;
 			for (i=0; i<7; i++) {
@@ -905,19 +895,15 @@ ISR(USB_COM_vect, ISR_BLOCK)
 			}
 			usb_ack_out();
 			usb_send_in();
-            printf("avr: set lineCoding done\n");
 			return;
 		}
 		if (bRequest == CDC_SET_CONTROL_LINE_STATE && bmRequestType == 0x21) {
-            printf("avr: set rtsdtr\n");
 			cdc_line_rtsdtr = wValue;
 			usb_wait_in_ready();
 			usb_send_in();
-            printf("avr: set rtsdtr done\n");
 			return;
 		}
 		if (bRequest == GET_STATUS) {
-            printf("avr: get status\n");
 			usb_wait_in_ready();
 			i = 0;
 			#ifdef SUPPORT_ENDPOINT_HALT
@@ -930,7 +916,6 @@ ISR(USB_COM_vect, ISR_BLOCK)
 			UEDATX = i;
 			UEDATX = 0;
 			usb_send_in();
-            printf("avr: get status done\n");
 			return;
 		}
 		#ifdef SUPPORT_ENDPOINT_HALT

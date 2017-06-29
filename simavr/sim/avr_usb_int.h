@@ -113,6 +113,7 @@ struct _epstate {
 
 struct usb_internal_state {
 	pthread_mutex_t mutex;
+    pthread_cond_t cpu_action;
 	struct _epstate ep_state[5];
 	avr_int_vector_t com_vect;
 	avr_int_vector_t gen_vect;

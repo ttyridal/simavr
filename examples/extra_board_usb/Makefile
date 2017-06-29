@@ -19,6 +19,7 @@
 target=	simusb
 firm_src = at90usb162_cdc_loopback.c
 firmware = ${firm_src:.c=.hex}
+firmware2 = ${firm_src:.c=.axf}
 simavr = ../../
 
 IPATH = .
@@ -32,7 +33,7 @@ VPATH += ../parts
 
 LDFLAGS += -lpthread
 
-all: obj ${firmware} ${target}
+all: obj ${firmware} ${target} ${firmware2}
 
 include ${simavr}/Makefile.common
 

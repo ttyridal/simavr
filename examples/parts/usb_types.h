@@ -68,13 +68,3 @@ struct usb_interface_descriptor
     byte bInterfaceProtocol;    // Protocol code (assigned by the USB-IF).  0xFF-Vendor specific.
     byte iInterface;            // Index of String Descriptor describing the interface.
 } __attribute__ ((__packed__));
-
-
-
-
-struct usb_endpoint {
-	uint8_t epnum;
-	uint8_t epsz;
-};
-
-

@@ -51,6 +51,8 @@
 
 #include "avr_usb.h"
 
+#define min(a,b) ((a)<(b)?(a):(b))
+
 struct usbip_t {
     struct avr_t * avr;
     bool attached;
@@ -61,22 +63,20 @@ struct usbip_t {
 static ssize_t
 avr_usb_read(
     const struct usbip_t * p,
-    struct usb_endpoint ep,
+    unsigned int ep,
     void * buf,
     size_t blen)
 {
     byte * b = buf;
-    struct avr_io_usb pkt = { ep.epnum, blen > ep.epsz ? ep.epsz : blen, b };
+    struct avr_io_usb pkt = { ep, blen, b };
     if (buf) {
         while (blen) {
-            printf("loop read blen: %zu ep.epsz:%d\n", blen, pkt.sz);
-            usleep(2000);
             switch (avr_ioctl(p->avr, AVR_IOCTL_USB_READ, &pkt)) {
                 case AVR_IOCTL_USB_NAK:
-                    printf(" NAK\n");
+                    printf(" NAK bytes %zu\n", pkt.buf - b);
                     return pkt.buf - b;
                 case AVR_IOCTL_USB_STALL:
-                    printf(" STALL\n");
+                    printf(" STALL (read)\n");
                     return -1;
                 case 0:
                     if (!pkt.sz)
@@ -86,8 +86,11 @@ avr_usb_read(
                     fprintf(stderr, "Unknown avr_ioctl return value\n");
                     abort();
             }
-            pkt.buf += pkt.sz;
-            blen -= pkt.sz;
+            printf("  rxed %d bytes from cpu\n", pkt.sz & 0xff);
+            pkt.buf += pkt.sz & 0xff;
+            blen -= pkt.sz & 0xff;
+            if (pkt.sz & 0xf00) break;
+            pkt.sz = blen;
         }
         return pkt.buf - b;
     } else {
@@ -103,11 +106,12 @@ avr_usb_read(
 static int
 avr_usb_write(
     const struct usbip_t * p,
-    struct usb_endpoint ep,
+    unsigned int ep,
     void * buf,
     size_t blen)
 {
-	struct avr_io_usb pkt = { ep.epnum, blen > ep.epsz ? ep.epsz : blen, buf };
+	struct avr_io_usb pkt = { ep, blen, buf };
+    printf("%s ep:%d, len:%zu\n", __FUNCTION__, ep, blen);
     do {
         switch (avr_ioctl(p->avr, AVR_IOCTL_USB_WRITE, &pkt)) {
             case 0: break;
@@ -115,15 +119,17 @@ avr_usb_write(
                 usleep(50000);
                 continue;
             case AVR_IOCTL_USB_STALL:
-                printf(" STALL\n");
+                printf(" STALL (write)\n");
                 return -1;
             default:
                 fprintf(stderr, "Unknown avr_ioctl return\n");
                 abort();
         }
         pkt.buf += pkt.sz;
-        pkt.sz = (blen > ep.epsz ? ep.epsz : blen);
-    } while (pkt.buf != buf + blen);
+        blen -= pkt.sz;
+        pkt.sz = blen;
+        if (!blen) break;
+    } while (1);
     return 0;
 }
 
@@ -137,7 +143,6 @@ control_read(
         word wLength,
         byte * data)
 {
-    static const struct usb_endpoint control_ep = {0, 8};
 	int ret;
 	struct usb_setup_pkt buf = {
         reqtype | USB_REQTYPE_DIR_DEV_TO_HOST,
@@ -145,16 +150,15 @@ control_read(
         wValue,
         wIndex,
         wLength };
-	struct avr_io_usb pkt = { control_ep.epnum, sizeof buf, (uint8_t*) &buf };
+    const unsigned int ctrlep = 0;
+	struct avr_io_usb pkt = { ctrlep, sizeof buf, (uint8_t*) &buf };
 
-    printf("ctrl_read %d %d %04x  %d bytes %zu\n", reqtype, req, wValue, wLength, sizeof buf);
+    printf("ctrl_read typ:%d req:%d val:%04x  len:%d bytes\n", reqtype, req, wValue, wLength);
 	avr_ioctl(p->avr, AVR_IOCTL_USB_SETUP, &pkt);
 
-    ret = avr_usb_read(p, control_ep, data, wLength);
+    ret = avr_usb_read(p, ctrlep, data, wLength);
 
-	usleep(1000);
-
-    avr_usb_write(p, control_ep, NULL, 0);
+    avr_usb_write(p, ctrlep, NULL, 0);
 
     return ret;
 }
@@ -233,265 +237,6 @@ vhci_usb_attach_hook(
 
     (void)irq;
 }
-#if 0
-
-static int
-control_write(
-        struct vhci_usb_t * p,
-        struct _ep * ep,
-        uint8_t reqtype,
-        uint8_t req,
-        uint16_t wValue,
-        uint16_t wIndex,
-        uint16_t wLength,
-        uint8_t * data)
-{
-	assert((reqtype&0x80)==0);
-	int ret;
-	struct usbsetup buf =
-		{ reqtype, req, wValue, wIndex, wLength };
-	struct avr_io_usb pkt =
-		{ ep->epnum, sizeof(struct usbsetup), (uint8_t*) &buf };
-
-	avr_ioctl(p->avr, AVR_IOCTL_USB_SETUP, &pkt);
-	usleep(10000);
-
-	if (wLength > 0) {
-		pkt.sz = (wLength > ep->epsz ? ep->epsz : wLength);
-		pkt.buf = data;
-		while ((ret = avr_ioctl(p->avr, AVR_IOCTL_USB_WRITE, &pkt)) != 0) {
-			if (ret == AVR_IOCTL_USB_NAK) {
-				usleep(50000);
-				continue;
-			}
-			if (ret == AVR_IOCTL_USB_STALL) {
-				printf(" STALL\n");
-				return ret;
-			}
-			assert(ret==0);
-			if (pkt.sz != ep->epsz)
-				break;
-			pkt.buf += pkt.sz;
-			wLength -= pkt.sz;
-			pkt.sz = (wLength > ep->epsz ? ep->epsz : wLength);
-		}
-	}
-
-	pkt.sz = 0;
-	while ((ret = avr_ioctl(p->avr, AVR_IOCTL_USB_READ, &pkt))
-	        == AVR_IOCTL_USB_NAK) {
-		usleep(50000);
-	}
-	return ret;
-}
-
-static void
-handle_status_change(
-        struct vhci_usb_t * p,
-        struct usb_vhci_port_stat*prev,
-        struct usb_vhci_port_stat*curr)
-{
-	if (~prev->status & USB_VHCI_PORT_STAT_POWER
-	        && curr->status & USB_VHCI_PORT_STAT_POWER) {
-		avr_ioctl(p->avr, AVR_IOCTL_USB_VBUS, (void*) 1);
-		if (p->attached) {
-			if (usb_vhci_port_connect(p->fd, 1, USB_VHCI_DATA_RATE_FULL) < 0) {
-				perror("port_connect");
-				abort();
-			}
-		}
-	}
-	if (prev->status & USB_VHCI_PORT_STAT_POWER
-	        && ~curr->status & USB_VHCI_PORT_STAT_POWER)
-		avr_ioctl(p->avr, AVR_IOCTL_USB_VBUS, 0);
-
-	if (curr->change & USB_VHCI_PORT_STAT_C_RESET
-	        && ~curr->status & USB_VHCI_PORT_STAT_RESET
-	        && curr->status & USB_VHCI_PORT_STAT_ENABLE) {
-//         printf("END OF RESET\n");
-	}
-	if (~prev->status & USB_VHCI_PORT_STAT_RESET
-	        && curr->status & USB_VHCI_PORT_STAT_RESET) {
-		avr_ioctl(p->avr, AVR_IOCTL_USB_RESET, NULL);
-		usleep(50000);
-		if (curr->status & USB_VHCI_PORT_STAT_CONNECTION) {
-			if (usb_vhci_port_reset_done(p->fd, 1, 1) < 0) {
-				perror("reset_done");
-				abort();
-			}
-		}
-	}
-	if (~prev->flags & USB_VHCI_PORT_STAT_FLAG_RESUMING
-	        && curr->flags & USB_VHCI_PORT_STAT_FLAG_RESUMING) {
-		printf("port resuming\n");
-		if (curr->status & USB_VHCI_PORT_STAT_CONNECTION) {
-			printf("  completing\n");
-			if (usb_vhci_port_resumed(p->fd, 1) < 0) {
-				perror("resumed");
-				abort();
-			}
-		}
-	}
-	if (~prev->status & USB_VHCI_PORT_STAT_SUSPEND
-	        && curr->status & USB_VHCI_PORT_STAT_SUSPEND)
-		printf("port suspedning\n");
-	if (prev->status & USB_VHCI_PORT_STAT_ENABLE
-	        && ~curr->status & USB_VHCI_PORT_STAT_ENABLE)
-		printf("port disabled\n");
-
-	*prev = *curr;
-}
-
-static void
-handle_ep0_control(
-        struct vhci_usb_t * p,
-        struct _ep * ep0,
-        struct usb_vhci_urb * urb)
-{
-	int res;
-	if (urb->bmRequestType &0x80) {
-		res = control_read(p,ep0,
-				urb->bmRequestType,
-				urb->bRequest,
-				urb->wValue,
-				urb->wIndex,
-				urb->wLength,
-				urb->buffer);
-			if (res>=0) {
-				urb->buffer_actual=res;
-				res=0;
-			}
-	}
-	else
-		res = control_write(p,ep0,
-			urb->bmRequestType,
-			urb->bRequest,
-			urb->wValue,
-			urb->wIndex,
-			urb->wLength,
-			urb->buffer);
-
-	if (res==AVR_IOCTL_USB_STALL)
-		urb->status = USB_VHCI_STATUS_STALL;
-	else
-		urb->status = USB_VHCI_STATUS_SUCCESS;
-}
-
-static void *
-vhci_usb_thread(
-		void * param)
-{
-	struct vhci_usb_t * p = (struct vhci_usb_t*) param;
-	struct _ep ep0 =
-		{ 0, 0 };
-	struct usb_vhci_port_stat port_status;
-	int id, busnum;
-	char*busid;
-	p->fd = usb_vhci_open(1, &id, &busnum, &busid);
-
-	if (p->fd < 0) {
-		perror("open vhci failed");
-		printf("driver loaded, and access bits ok?\n");
-		abort();
-	}
-	printf("Created virtual usb host with 1 port at %s (bus# %d)\n", busid,
-	        busnum);
-	memset(&port_status, 0, sizeof port_status);
-
-	bool avrattached = false;
-
-	for (unsigned cycle = 0;; cycle++) {
-		struct usb_vhci_work wrk;
-
-		int res = usb_vhci_fetch_work(p->fd, &wrk);
-
-		if (p->attached != avrattached) {
-			if (p->attached && port_status.status & USB_VHCI_PORT_STAT_POWER) {
-				if (usb_vhci_port_connect(p->fd, 1, USB_VHCI_DATA_RATE_FULL)
-				        < 0) {
-					perror("port_connect");
-					abort();
-				}
-			}
-			if (!p->attached) {
-				ep0.epsz = 0;
-				//disconnect
-			}
-			avrattached = p->attached;
-		}
-
-		if (res < 0) {
-			if (errno == ETIMEDOUT || errno == EINTR || errno == ENODATA)
-				continue;
-			perror("fetch work failed");
-			abort();
-		}
-
-		switch (wrk.type) {
-			case USB_VHCI_WORK_TYPE_PORT_STAT:
-				handle_status_change(p, &port_status, &wrk.work.port_stat);
-				break;
-			case USB_VHCI_WORK_TYPE_PROCESS_URB:
-				if (!ep0.epsz)
-					ep0.epsz = get_ep0_size(p);
-
-				wrk.work.urb.buffer = 0;
-				wrk.work.urb.iso_packets = 0;
-				if (wrk.work.urb.buffer_length)
-					wrk.work.urb.buffer = malloc(wrk.work.urb.buffer_length);
-				if (wrk.work.urb.packet_count)
-					wrk.work.urb.iso_packets = malloc(
-					        wrk.work.urb.packet_count
-					                * sizeof(struct usb_vhci_iso_packet));
-				if (res) {
-					if (usb_vhci_fetch_data(p->fd, &wrk.work.urb) < 0) {
-						if (errno != ECANCELED)
-							perror("fetch_data");
-						free(wrk.work.urb.buffer);
-						free(wrk.work.urb.iso_packets);
-						usb_vhci_giveback(p->fd, &wrk.work.urb);
-						break;
-					}
-				}
-
-				if (usb_vhci_is_control(wrk.work.urb.type)
-				        && !(wrk.work.urb.epadr & 0x7f)) {
-					handle_ep0_control(p, &ep0, &wrk.work.urb);
-
-				} else {
-					struct avr_io_usb pkt =
-						{ wrk.work.urb.epadr, wrk.work.urb.buffer_actual,
-						        wrk.work.urb.buffer };
-					if (usb_vhci_is_out(wrk.work.urb.epadr))
-						res = avr_ioctl(p->avr, AVR_IOCTL_USB_WRITE, &pkt);
-					else {
-						pkt.sz = wrk.work.urb.buffer_length;
-						res = avr_ioctl(p->avr, AVR_IOCTL_USB_READ, &pkt);
-						wrk.work.urb.buffer_actual = pkt.sz;
-					}
-					if (res == AVR_IOCTL_USB_STALL)
-						wrk.work.urb.status = USB_VHCI_STATUS_STALL;
-					else if (res == AVR_IOCTL_USB_NAK)
-						wrk.work.urb.status = USB_VHCI_STATUS_TIMEDOUT;
-					else
-						wrk.work.urb.status = USB_VHCI_STATUS_SUCCESS;
-				}
-				if (usb_vhci_giveback(p->fd, &wrk.work.urb) < 0)
-					perror("giveback");
-				free(wrk.work.urb.buffer);
-				free(wrk.work.urb.iso_packets);
-				break;
-			case USB_VHCI_WORK_TYPE_CANCEL_URB:
-				printf("cancel urb\n");
-				break;
-			default:
-				printf("illegal work type\n");
-				abort();
-		}
-
-	}
-}
-#endif
 
 static int sock_read_exact(
         int sockfd,
@@ -692,7 +437,6 @@ handle_usbip_connection(
                         return;
                     ssize_t bl = ntohl(cmd.u.submit.transfer_buffer_length);
                     byte buf[bl];
-                    struct usb_endpoint endpoint = {ep,8};
 
                     if (ep == 0) {
                         printf("submit_setup\n    reqType:%x\n    req: %x\n    val: %04x\n    idx: %d\n    wLength: %d\n    bl: %zu\n",
@@ -705,7 +449,9 @@ handle_usbip_connection(
 
 
                         struct avr_io_usb pkt = { ep, sizeof cmd.u.submit.setup, cmd.u.submit.setup };
-                        avr_ioctl(p->avr, AVR_IOCTL_USB_SETUP, &pkt);
+                        if (avr_ioctl(p->avr, AVR_IOCTL_USB_SETUP, &pkt)) {
+                            printf("FATAL: SETUP packet failed!\n");
+                        }
                         printf("data phase\n");
                     } else {
                         printf("submit\n    flags: %x\n    start_Frame: %d\n    num_of_pkts: %d\n    interval: %d\n    bl: %zu\n",
@@ -717,22 +463,24 @@ handle_usbip_connection(
                     }
 
                     if (direction == USBIP_DIR_IN) {
-                        if (bl)
-                            bl = avr_usb_read(p, endpoint, buf, bl);
+                        if (bl) {
+                            printf("data phase - read\n");
+                            bl = avr_usb_read(p, ep, buf, bl);
+                        }
                         if (ep == 0) {
-                            printf("data phase 2\n");
-                            usleep(30000);
-                            avr_usb_write(p, endpoint, NULL, 0);
+                            printf("data phase 2 - read\n");
+                            avr_usb_write(p, ep, NULL, 0);
                         }
                     } else {
                         if (bl && sock_read_exact(sockfd, buf, bl))
                             return;
-                        if (bl)
-                            bl = avr_usb_write(p, endpoint, buf, bl);
+                        if (bl) {
+                            printf("data phase - write\n");
+                            bl = avr_usb_write(p, ep, buf, bl);
+                        }
                         if (ep == 0) {
-                            printf("data phase 2\n");
-                            usleep(2000);
-                            avr_usb_read(p, endpoint, NULL, 0);
+                            printf("data phase 2 - write\n");
+                            avr_usb_read(p, ep, NULL, 0);
                         }
                     }
 
@@ -740,7 +488,6 @@ handle_usbip_connection(
                     struct usbip_header ret;
                     ret.hdr = cmd.hdr;
                     ret.hdr.command = htonl(USBIP_RET_SUBMIT);
-                    ret.hdr.direction = 0;
                     ret.u.retsubmit.status = htonl(bl < 0 ? USBIP_ST_NA : USBIP_ST_OK);
                     ret.u.retsubmit.actual_length = htonl(bl < 0 ? 0 : bl);
                     ret.u.retsubmit.start_frame = 0;
@@ -749,7 +496,6 @@ handle_usbip_connection(
                     memcpy(&ret.u.retsubmit.setup, cmd.u.submit.setup, 8);
 
                     printf("return %zd bytes\n", bl);
-                    usleep(50000);
                     if (send(sockfd, &ret, sizeof ret.hdr + sizeof ret.u.retsubmit, 0) != sizeof ret.hdr + sizeof ret.u.retsubmit)
                         perror("sock send");
                     if (bl>0 && send(sockfd, buf, bl, 0) != bl)

@@ -23,7 +23,6 @@
 /* TODO generate sofi every 1ms (when connected) */
 /* TODO otg support? */
 /* TODO drop bitfields? */
-/* TODO thread safe ioctls */
 /* TODO dual-bank endpoint buffers */
 /* TODO actually pay attention to endpoint memory allocation ? buggy endpoint configuration doesn't matter in the simulator now. */
 
@@ -187,25 +186,21 @@ host_read_ep_fifo(
 		return AVR_IOCTL_USB_NAK;
 	}
 
-	int ret = epstate->bank[epstate->current_bank].tail;
-	printf("%s buflen:%zu, fifo:%d\n",__FUNCTION__,sz,ret);
-	sz = min(epstate->bank[epstate->current_bank].tail, sz);
+    if (sz < epstate->bank[epstate->current_bank].tail) {
+        printf("WARNING! Loosing bytes in %s\n", __FUNCTION__);
+    }
+	int ret = min(epstate->bank[epstate->current_bank].tail, sz);
 	memcpy(buf, epstate->bank[epstate->current_bank].bytes,
-	        sz);
-// 	int i,j;
-// 	for (i=0, j=ret; j < epstate->bank[epstate->current_bank].tail; i++, j++)
-// 		epstate->bank[epstate->current_bank].bytes[i] =
-// 			epstate->bank[epstate->current_bank].bytes[j];
-
+	        ret);
 	epstate->bank[epstate->current_bank].tail = 0;
-	return ret + (ep_fifo_size(epstate) << 8);
+	return ret + (ret < ep_fifo_size(epstate) ? 0x100 : 0);
 }
 
 static int
 host_write_ep_fifo(
         struct _epstate * epstate,
         uint8_t * buf,
-        uint8_t len)
+        size_t len)
 {
 	if (!epstate->ueconx.epen) {
 		printf("WARNING! Adding bytes to non configured endpoint\n");
@@ -219,13 +214,12 @@ host_write_ep_fifo(
 		return AVR_IOCTL_USB_NAK;
 	}
 
-	if (len > ep_fifo_size(epstate)) {
-		printf("EP OVERFI\n");
-		len = sizeof epstate->bank[epstate->current_bank].bytes;
-	}memcpy(epstate->bank[epstate->current_bank].bytes, buf, len);
+    len = min(ep_fifo_size(epstate), len);
+
+	memcpy(epstate->bank[epstate->current_bank].bytes, buf, len);
 	epstate->bank[epstate->current_bank].tail = len;
 
-	return 0;
+	return len;
 }
 
 static uint8_t
@@ -308,11 +302,14 @@ avr_usb_ep_write_ueintx(
 	if (curstate->txini & !newstate->txini) {
 		curstate->txini = 0;
 		printf("ep%d cpu released buffer, with data\n",ep);
+        pthread_cond_signal(&p->state->cpu_action);
 	}
 	if (curstate->rxstpi & !newstate->rxstpi) {
-		curstate->txini = 1;
-		curstate->rxouti = 0;
+// 		curstate->txini = 1;
+// 		curstate->rxouti = 0;
 		curstate->rxstpi = 0;
+        printf("ep%d CPU ack setup\n", ep);
+        pthread_cond_signal(&p->state->cpu_action);
 	}
 	if (curstate->fifocon & !newstate->fifocon) {
 		curstate->fifocon = 0;
@@ -389,9 +386,11 @@ avr_usb_ep_write(
 		case uecfg1x:
 			epstate->uecfg1x.v = v;
 			epstate->uesta0x.cfgok = epstate->uecfg1x.alloc;
-			if (epstate->uecfg0x.eptype == 0)
+			if (epstate->uecfg0x.eptype == 0) {
 				epstate->ueintx.txini = 1;
-			else if (epstate->uecfg0x.epdir) {
+				epstate->ueintx.rwal = 0;
+				epstate->ueintx.fifocon = 0;
+            } else if (epstate->uecfg0x.epdir) {
 				epstate->ueintx.txini = 1;
 				epstate->ueintx.rwal = 1;
 				epstate->ueintx.fifocon = 1;
@@ -510,6 +509,7 @@ avr_usb_ioctl(
 	struct avr_io_usb * d = (struct avr_io_usb*) io_param;
 	struct _epstate * epstate = 0;
 	int ret;
+    struct timespec ts;
 	uint8_t ep;
 
 	switch (ctl) {
@@ -526,6 +526,21 @@ avr_usb_ioctl(
 
 			if (pthread_mutex_lock(&p->state->mutex))
 				abort();
+
+            if (!d->sz && !d->buf && !epstate->ueintx.txini) { // status already ok for control write
+                pthread_mutex_unlock(&p->state->mutex);
+                return 0;
+            }
+
+            epstate->ueintx.fifocon = 1 & (epstate->uecfg0x.eptype != 0);
+            raise_ep_interrupt(io->avr, p, ep, txini);
+
+            ret = 0;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_sec += 1;
+            while (epstate->ueintx.txini && !ret)
+                ret = pthread_cond_timedwait(&p->state->cpu_action, &p->state->mutex, &ts);
+
 			ret = host_read_ep_fifo(epstate, d->buf, d->sz);
 			pthread_mutex_unlock(&p->state->mutex);
 
@@ -540,15 +555,8 @@ avr_usb_ioctl(
 					return ret;
 			}
 
-			if (pthread_mutex_lock(&p->state->mutex))
-				abort();
-			if (ep_fifo_empty(epstate)) {
-				epstate->ueintx.fifocon = 1;
-				pthread_mutex_unlock(&p->state->mutex);
-				raise_ep_interrupt(io->avr, p, ep, txini);
-				printf("ep%d Buffer with CPU\n", ep);
-			} else
-				pthread_mutex_unlock(&p->state->mutex);
+			d->sz = ret;
+			ret = 0;
 
 			return ret;
 		case AVR_IOCTL_USB_WRITE:
@@ -570,8 +578,8 @@ avr_usb_ioctl(
 				pthread_mutex_unlock(&p->state->mutex);
 				return ret;
 			}
-
-			epstate->ueintx.fifocon = 1;
+            d->sz = ret;
+			epstate->ueintx.fifocon = 1 & (epstate->uecfg0x.eptype != 0);
 			pthread_mutex_unlock(&p->state->mutex);
 			raise_ep_interrupt(io->avr, p, ep, rxouti);
 			printf("ep%d Buffer with CPU\n", ep);
@@ -580,18 +588,37 @@ avr_usb_ioctl(
 			ep = d->pipe & 0x7f;
 			epstate = get_epstate(p, ep);
 
+			if (pthread_mutex_lock(&p->state->mutex))
+				abort();
 			epstate->ueconx.stallrq = 0;
-			// teensy actually depends on this (fails to ack rxouti on usb
-			// control read status stage) even if the datasheet clearly states
-			// that one should do so.
 			epstate->ueintx.rxouti = 0;
+            epstate->ueintx.txini = 1;
+
+            assert(d->buf && d->sz==8);
 
 			ret = host_write_ep_fifo(epstate, d->buf, d->sz);
+			pthread_mutex_unlock(&p->state->mutex);
+
 			if (ret < 0)
 				return ret;
 			raise_ep_interrupt(io->avr, p, ep, rxstpi);
 
-			return 0;
+			if (pthread_mutex_lock(&p->state->mutex))
+				abort();
+
+            // wait for cpu to ack setup
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_sec += 1;
+            ret = 0;
+            if (d->buf[0] & 0x80) { // control READ
+                while (!ret && (epstate->ueintx.rxstpi || epstate->ueintx.txini))
+                    ret = pthread_cond_timedwait(&p->state->cpu_action, &p->state->mutex, &ts);
+            } else { // control WRITE
+                while (epstate->ueintx.rxstpi && !ret)
+                    ret = pthread_cond_timedwait(&p->state->cpu_action, &p->state->mutex, &ts);
+            }
+            pthread_mutex_unlock(&p->state->mutex);
+            return ret;
 		case AVR_IOCTL_USB_RESET:
 			AVR_LOG(io->avr, LOG_TRACE, "USB: __USB_RESET__\n");
 			reset_endpoints(io->avr, p);
