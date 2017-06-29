@@ -295,26 +295,18 @@ avr_usb_ep_write_ueintx(
 	union _ueintx * newstate = (union _ueintx*) &v;
 	union _ueintx * curstate = &p->state->ep_state[ep].ueintx;
 
-	if (curstate->rxouti & !newstate->rxouti) {
+	if (curstate->rxouti & !newstate->rxouti)
 		curstate->rxouti = 0;
-		printf("ep%d cpu released buffer, empty\n",ep);
-	}
 	if (curstate->txini & !newstate->txini) {
 		curstate->txini = 0;
-		printf("ep%d cpu released buffer, with data\n",ep);
         pthread_cond_signal(&p->state->cpu_action);
 	}
 	if (curstate->rxstpi & !newstate->rxstpi) {
-// 		curstate->txini = 1;
-// 		curstate->rxouti = 0;
 		curstate->rxstpi = 0;
-        printf("ep%d CPU ack setup\n", ep);
         pthread_cond_signal(&p->state->cpu_action);
 	}
-	if (curstate->fifocon & !newstate->fifocon) {
+	if (curstate->fifocon & !newstate->fifocon)
 		curstate->fifocon = 0;
-		printf("ep%d CPU released buffer\n", ep);
-	}
 	if (curstate->nakini & !newstate->nakini)
 		curstate->nakini = 0;
 	if (curstate->nakouti & !newstate->nakouti)
@@ -527,7 +519,8 @@ avr_usb_ioctl(
 			if (pthread_mutex_lock(&p->state->mutex))
 				abort();
 
-            if (!d->sz && !d->buf && !epstate->ueintx.txini) { // status already ok for control write
+            if (!d->sz && !d->buf && !epstate->ueintx.txini && !epstate->uecfg0x.eptype) {
+                // status already ok for control write
                 pthread_mutex_unlock(&p->state->mutex);
                 return 0;
             }
@@ -580,9 +573,8 @@ avr_usb_ioctl(
 			}
             d->sz = ret;
 			epstate->ueintx.fifocon = 1 & (epstate->uecfg0x.eptype != 0);
-			pthread_mutex_unlock(&p->state->mutex);
 			raise_ep_interrupt(io->avr, p, ep, rxouti);
-			printf("ep%d Buffer with CPU\n", ep);
+			pthread_mutex_unlock(&p->state->mutex);
 			return 0;
 		case AVR_IOCTL_USB_SETUP:
 			ep = d->pipe & 0x7f;
@@ -745,4 +737,3 @@ void avr_usb_init(avr_t * avr, avr_usb_t * p)
 
 	avr_register_io_write(avr, p->r_pllcsr, avr_usb_pll_write, p);
 }
-

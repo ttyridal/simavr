@@ -73,8 +73,8 @@ avr_usb_read(
         while (blen) {
             switch (avr_ioctl(p->avr, AVR_IOCTL_USB_READ, &pkt)) {
                 case AVR_IOCTL_USB_NAK:
-                    printf(" NAK bytes %zu\n", pkt.buf - b);
-                    return pkt.buf - b;
+                    if (pkt.buf - b == 0) return -1;
+                    else return pkt.buf - b;
                 case AVR_IOCTL_USB_STALL:
                     printf(" STALL (read)\n");
                     return -1;
@@ -86,7 +86,7 @@ avr_usb_read(
                     fprintf(stderr, "Unknown avr_ioctl return value\n");
                     abort();
             }
-            printf("  rxed %d bytes from cpu\n", pkt.sz & 0xff);
+//             printf("  rxed %d bytes from cpu\n", pkt.sz & 0xff);
             pkt.buf += pkt.sz & 0xff;
             blen -= pkt.sz & 0xff;
             if (pkt.sz & 0xf00) break;
@@ -111,7 +111,7 @@ avr_usb_write(
     size_t blen)
 {
 	struct avr_io_usb pkt = { ep, blen, buf };
-    printf("%s ep:%d, len:%zu\n", __FUNCTION__, ep, blen);
+//     printf("%s ep:%d, len:%zu\n", __FUNCTION__, ep, blen);
     do {
         switch (avr_ioctl(p->avr, AVR_IOCTL_USB_WRITE, &pkt)) {
             case 0: break;
@@ -424,12 +424,12 @@ handle_usbip_connection(
             int cmdnum = ntohl(cmd.hdr.command);
             int direction = ntohl(cmd.hdr.direction);
 
-            printf("Got command: %d seq: %d  devid: %d  ep: %d %s\n",
-                    cmdnum,
-                    ntohl(cmd.hdr.seqnum),
-                    ntohl(cmd.hdr.devid),
-                    ep,
-                    direction == USBIP_DIR_IN ? "in" : "out");
+//             printf("Got command: %d seq: %d  devid: %d  ep: %d %s\n",
+//                     cmdnum,
+//                     ntohl(cmd.hdr.seqnum),
+//                     ntohl(cmd.hdr.devid),
+//                     ep,
+//                     direction == USBIP_DIR_IN ? "in" : "out");
 
             switch (cmdnum) {
                 case USBIP_CMD_SUBMIT: {
@@ -439,47 +439,43 @@ handle_usbip_connection(
                     byte buf[bl];
 
                     if (ep == 0) {
-                        printf("submit_setup\n    reqType:%x\n    req: %x\n    val: %04x\n    idx: %d\n    wLength: %d\n    bl: %zu\n",
-                                cmd.u.submit.setup[0],
-                                cmd.u.submit.setup[1],
-                                (cmd.u.submit.setup[3] << 8) + cmd.u.submit.setup[2],
-                                (cmd.u.submit.setup[5] << 8) + cmd.u.submit.setup[4],
-                                (cmd.u.submit.setup[7] << 8) + cmd.u.submit.setup[6],
-                                bl);
+//                         printf("submit_setup\n    reqType:%x\n    req: %x\n    val: %04x\n    idx: %d\n    wLength: %d\n    bl: %zu\n",
+//                                 cmd.u.submit.setup[0],
+//                                 cmd.u.submit.setup[1],
+//                                 (cmd.u.submit.setup[3] << 8) + cmd.u.submit.setup[2],
+//                                 (cmd.u.submit.setup[5] << 8) + cmd.u.submit.setup[4],
+//                                 (cmd.u.submit.setup[7] << 8) + cmd.u.submit.setup[6],
+//                                 bl);
 
 
                         struct avr_io_usb pkt = { ep, sizeof cmd.u.submit.setup, cmd.u.submit.setup };
                         if (avr_ioctl(p->avr, AVR_IOCTL_USB_SETUP, &pkt)) {
                             printf("FATAL: SETUP packet failed!\n");
                         }
-                        printf("data phase\n");
+//                         printf("data phase\n");
                     } else {
-                        printf("submit\n    flags: %x\n    start_Frame: %d\n    num_of_pkts: %d\n    interval: %d\n    bl: %zu\n",
-                                ntohl(cmd.u.submit.transfer_flags),
-                                ntohl(cmd.u.submit.start_frame),
-                                cmd.u.submit.number_of_packets,
-                                cmd.u.submit.interval,
-                                bl);
+//                         printf("submit\n    flags: %x\n    start_Frame: %d\n    num_of_pkts: %d\n    interval: %d\n    bl: %zu\n",
+//                                 ntohl(cmd.u.submit.transfer_flags),
+//                                 ntohl(cmd.u.submit.start_frame),
+//                                 cmd.u.submit.number_of_packets,
+//                                 cmd.u.submit.interval,
+//                                 bl);
                     }
 
                     if (direction == USBIP_DIR_IN) {
                         if (bl) {
-                            printf("data phase - read\n");
                             bl = avr_usb_read(p, ep, buf, bl);
                         }
                         if (ep == 0) {
-                            printf("data phase 2 - read\n");
                             avr_usb_write(p, ep, NULL, 0);
                         }
                     } else {
                         if (bl && sock_read_exact(sockfd, buf, bl))
                             return;
                         if (bl) {
-                            printf("data phase - write\n");
                             bl = avr_usb_write(p, ep, buf, bl);
                         }
                         if (ep == 0) {
-                            printf("data phase 2 - write\n");
                             avr_usb_read(p, ep, NULL, 0);
                         }
                     }
