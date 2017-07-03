@@ -116,6 +116,7 @@ avr_usb_write(
         switch (avr_ioctl(p->avr, AVR_IOCTL_USB_WRITE, &pkt)) {
             case 0: break;
             case AVR_IOCTL_USB_NAK:
+                if (buf) return -1;
                 usleep(50000);
                 continue;
             case AVR_IOCTL_USB_STALL:
@@ -473,6 +474,7 @@ handle_usbip_connection(
                         if (bl && sock_read_exact(sockfd, buf, bl))
                             return;
                         if (bl) {
+//                             if(ep) printf("ep#%d -> %.*s\n", ep, (int)bl, buf);
                             bl = avr_usb_write(p, ep, buf, bl);
                         }
                         if (ep == 0) {
@@ -491,13 +493,13 @@ handle_usbip_connection(
                     ret.u.retsubmit.error_count = 0;
                     memcpy(&ret.u.retsubmit.setup, cmd.u.submit.setup, 8);
 
-                    printf("return %zd bytes\n", bl);
+//                     printf("return %zd bytes\n", bl);
                     if (send(sockfd, &ret, sizeof ret.hdr + sizeof ret.u.retsubmit, 0) != sizeof ret.hdr + sizeof ret.u.retsubmit)
                         perror("sock send");
                     if (bl>0 && send(sockfd, buf, bl, 0) != bl)
                         perror("sock send");
 
-                    printf("done\n");
+//                     printf("done\n");
 
 
                     break;

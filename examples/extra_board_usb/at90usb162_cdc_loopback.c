@@ -366,7 +366,8 @@ int16_t usb_serial_getchar(void)
 	// take one byte out of the buffer
 	c = UEDATX;
 	// if buffer completely used, release it
-	if (!(UEINTX & (1<<RWAL))) UEINTX = 0x6B;
+	if (!(UEINTX & (1<<RWAL)))
+        UEINTX = 0x6B;
 	SREG = intr_state;
 	return c;
 }
@@ -412,7 +413,10 @@ int8_t usb_serial_putchar(uint8_t c)
 	uint8_t timeout, intr_state;
 
 	// if we're not online (enumerated and configured), error
-	if (!usb_configuration) return -1;
+	if (!usb_configuration) {
+        printf("avr: not configured\n");
+        return -1;
+    }
 	// interrupts are disabled so these functions can be
 	// used from the main program or interrupt context,
 	// even both in the same program!
@@ -423,6 +427,7 @@ int8_t usb_serial_putchar(uint8_t c)
 	if (transmit_previous_timeout) {
 		if (!(UEINTX & (1<<RWAL))) {
 			SREG = intr_state;
+            printf("avr: prev.timeout\n");
 			return -1;
 		}
 		transmit_previous_timeout = 0;
@@ -437,10 +442,14 @@ int8_t usb_serial_putchar(uint8_t c)
 		// is not running an application that is listening
 		if (UDFNUML == timeout) {
 			transmit_previous_timeout = 1;
+            printf("avr: timeout\n");
 			return -1;
 		}
 		// has the USB gone offline?
-		if (!usb_configuration) return -1;
+		if (!usb_configuration) {
+            printf("avr: offline\n");
+            return -1;
+        }
 		// get ready to try checking again
 		intr_state = SREG;
 		cli();
@@ -449,7 +458,11 @@ int8_t usb_serial_putchar(uint8_t c)
 	// actually write the byte into the FIFO
 	UEDATX = c;
 	// if this completed a packet, transmit it now!
-	if (!(UEINTX & (1<<RWAL))) UEINTX = 0x3A;
+	if (!(UEINTX & (1<<RWAL))) {
+        printf("avr: fifo full -> tx!\n");
+        UEINTX = 0x3A;
+    }
+
 	transmit_flush_timer = TRANSMIT_FLUSH_TIMEOUT;
 	SREG = intr_state;
 	return 0;
@@ -738,6 +751,7 @@ ISR(USB_GEN_vect, ISR_BLOCK)
 			if (t) {
 				transmit_flush_timer = --t;
 				if (!t) {
+                    printf("avr: flush\n");
 					UENUM = CDC_TX_ENDPOINT;
 					UEINTX = 0x3A;
 				}
@@ -826,12 +840,10 @@ ISR(USB_COM_vect, ISR_BLOCK)
 			len = (wLength < 256) ? wLength : 255;
 			if (len > desc_length) len = desc_length;
 			do {
-                printf("avr:wait txini\n");
 				// wait for host ready for IN packet
 				do {
 					i = UEINTX;
 				} while (!(i & ((1<<TXINI)|(1<<RXOUTI))));
-                printf("avr: good %d\n", i & (1<<RXOUTI));
 				if (i & (1<<RXOUTI))
 				{
 					return;	// abort
@@ -955,7 +967,6 @@ int main(void)
 stdout=&dwout;
 	CPU_PRESCALE(0);
 	usb_init();
-    printf("AVR-wait configuring\n");
 	while(usb_configured()==0);
     printf("AVR configured\n");
 	while (1) {

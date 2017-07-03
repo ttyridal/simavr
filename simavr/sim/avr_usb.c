@@ -20,7 +20,6 @@
  */
 
 /* TODO correct reset values */
-/* TODO generate sofi every 1ms (when connected) */
 /* TODO otg support? */
 /* TODO drop bitfields? */
 /* TODO dual-bank endpoint buffers */
@@ -35,6 +34,17 @@
 #include "avr_usb_int.h"
 
 #define min(a,b) ((a)<(b)?(a):(b))
+
+static inline struct timespec ts_add(struct timespec a, struct timespec b) {
+    a.tv_sec += b.tv_sec;
+    a.tv_nsec += b.tv_nsec;
+    if (a.tv_nsec >= 1000000000L) {		/* Carry? */
+        a.tv_sec++ ;  a.tv_nsec = a.tv_nsec - 1000000000L ;
+    }
+
+    return a;
+}
+
 
 const uint8_t num_endpoints = 5;//sizeof (struct usb_internal_state.ep_state) / sizeof (struct usb_internal_state.ep_state[0]);
 
@@ -218,6 +228,7 @@ host_write_ep_fifo(
 
 	memcpy(epstate->bank[epstate->current_bank].bytes, buf, len);
 	epstate->bank[epstate->current_bank].tail = len;
+    epstate->ueintx.rwal = 1 & (epstate->uecfg0x.eptype != 0);
 
 	return len;
 }
@@ -288,17 +299,19 @@ avr_usb_ep_write_ueintx(
 {
 	avr_usb_t * p = (avr_usb_t *) param;
 	uint8_t ep = current_ep_to_cpu(p);
+    struct _epstate * epstate = get_epstate(p, ep);
 
 	if(pthread_mutex_lock(&p->state->mutex))
 		abort();
 
 	union _ueintx * newstate = (union _ueintx*) &v;
-	union _ueintx * curstate = &p->state->ep_state[ep].ueintx;
+	union _ueintx * curstate = &epstate->ueintx;
 
 	if (curstate->rxouti & !newstate->rxouti)
 		curstate->rxouti = 0;
 	if (curstate->txini & !newstate->txini) {
 		curstate->txini = 0;
+        printf("txini! %d bytes\n", ep_fifo_count(epstate));
         pthread_cond_signal(&p->state->cpu_action);
 	}
 	if (curstate->rxstpi & !newstate->rxstpi) {
@@ -487,7 +500,7 @@ sof_generator(
 		return 0;
 	else {
 		raise_usb_interrupt(p, sofi);
-		return when;
+		return when+1000;
 	}
 }
 
@@ -530,7 +543,10 @@ avr_usb_ioctl(
 
             ret = 0;
             clock_gettime(CLOCK_REALTIME, &ts);
-            ts.tv_sec += 1;
+            if (ep)
+                ts = ts_add(ts, (struct timespec){0, 1000});
+            else
+                ts = ts_add(ts, (struct timespec){0, 10000000L});
             while (epstate->ueintx.txini && !ret)
                 ret = pthread_cond_timedwait(&p->state->cpu_action, &p->state->mutex, &ts);
 
@@ -615,7 +631,7 @@ avr_usb_ioctl(
 			AVR_LOG(io->avr, LOG_TRACE, "USB: __USB_RESET__\n");
 			reset_endpoints(io->avr, p);
 			raise_usb_interrupt(p, eorsti);
-			if (0)
+			if (1)
 				avr_cycle_timer_register_usec(io->avr, 1000, sof_generator, p);
 			return 0;
 		default:

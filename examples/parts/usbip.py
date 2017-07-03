@@ -165,7 +165,9 @@ def go_import(s):
 
 
 
-with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
+srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+with closing(srv):
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("0.0.0.0", 3240))
     srv.listen(1)

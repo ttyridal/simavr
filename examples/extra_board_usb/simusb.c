@@ -130,6 +130,7 @@ int main(int argc, char *argv[])
 
 	// even if not setup at startup, activate gdb if crashing
 	avr->gdb_port = 1234;
+    avr_gdb_init(avr);
 	if (0) {
 		//avr->state = cpu_Stopped;
 		avr_gdb_init(avr);
