@@ -414,7 +414,6 @@ int8_t usb_serial_putchar(uint8_t c)
 
 	// if we're not online (enumerated and configured), error
 	if (!usb_configuration) {
-        printf("avr: not configured\n");
         return -1;
     }
 	// interrupts are disabled so these functions can be
@@ -427,7 +426,6 @@ int8_t usb_serial_putchar(uint8_t c)
 	if (transmit_previous_timeout) {
 		if (!(UEINTX & (1<<RWAL))) {
 			SREG = intr_state;
-            printf("avr: prev.timeout\n");
 			return -1;
 		}
 		transmit_previous_timeout = 0;
@@ -442,12 +440,10 @@ int8_t usb_serial_putchar(uint8_t c)
 		// is not running an application that is listening
 		if (UDFNUML == timeout) {
 			transmit_previous_timeout = 1;
-            printf("avr: timeout\n");
 			return -1;
 		}
 		// has the USB gone offline?
 		if (!usb_configuration) {
-            printf("avr: offline\n");
             return -1;
         }
 		// get ready to try checking again
@@ -458,10 +454,8 @@ int8_t usb_serial_putchar(uint8_t c)
 	// actually write the byte into the FIFO
 	UEDATX = c;
 	// if this completed a packet, transmit it now!
-	if (!(UEINTX & (1<<RWAL))) {
-        printf("avr: fifo full -> tx!\n");
+	if (!(UEINTX & (1<<RWAL)))
         UEINTX = 0x3A;
-    }
 
 	transmit_flush_timer = TRANSMIT_FLUSH_TIMEOUT;
 	SREG = intr_state;
@@ -647,6 +641,7 @@ void usb_serial_flush_output(void)
 	intr_state = SREG;
 	cli();
 	if (transmit_flush_timer) {
+            printf("avr: force-flush\n");
 		UENUM = CDC_TX_ENDPOINT;
 		UEINTX = 0x3A;
 		transmit_flush_timer = 0;
@@ -751,7 +746,7 @@ ISR(USB_GEN_vect, ISR_BLOCK)
 			if (t) {
 				transmit_flush_timer = --t;
 				if (!t) {
-                    printf("avr: flush\n");
+                                    printf("flush!\n");
 					UENUM = CDC_TX_ENDPOINT;
 					UEINTX = 0x3A;
 				}
@@ -765,6 +760,12 @@ ISR(USB_GEN_vect, ISR_BLOCK)
 static inline void usb_wait_in_ready(void)
 {
 	while (!(UEINTX & (1<<TXINI))) ;
+}
+static inline int usb_wait_in_ready_2(void)
+{
+    unsigned short retry = 0;
+	while (!(UEINTX & (1<<TXINI)) && ++retry);
+    return !(UEINTX & (1<<TXINI));
 }
 static inline void usb_send_in(void)
 {
@@ -804,6 +805,7 @@ ISR(USB_COM_vect, ISR_BLOCK)
 	UENUM = 0;
 	intbits = UEINTX;
 	if (intbits & (1<<RXSTPI)) {
+            printf("avr: setup\n");
 		bmRequestType = UEDATX;
 		bRequest = UEDATX;
 		wValue = UEDATX;
@@ -911,7 +913,10 @@ ISR(USB_COM_vect, ISR_BLOCK)
 		}
 		if (bRequest == CDC_SET_CONTROL_LINE_STATE && bmRequestType == 0x21) {
 			cdc_line_rtsdtr = wValue;
-			usb_wait_in_ready();
+			if (usb_wait_in_ready_2()) {
+                            printf("avr: failed wait ready\n");
+                            //return;
+                        }
 			usb_send_in();
 			return;
 		}

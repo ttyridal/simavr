@@ -425,13 +425,6 @@ handle_usbip_connection(
             int cmdnum = ntohl(cmd.hdr.command);
             int direction = ntohl(cmd.hdr.direction);
 
-//             printf("Got command: %d seq: %d  devid: %d  ep: %d %s\n",
-//                     cmdnum,
-//                     ntohl(cmd.hdr.seqnum),
-//                     ntohl(cmd.hdr.devid),
-//                     ep,
-//                     direction == USBIP_DIR_IN ? "in" : "out");
-
             switch (cmdnum) {
                 case USBIP_CMD_SUBMIT: {
                     if (sock_read_exact(sockfd, &cmd.u.submit, sizeof cmd.u.submit))
@@ -440,46 +433,26 @@ handle_usbip_connection(
                     byte buf[bl];
 
                     if (ep == 0) {
-//                         printf("submit_setup\n    reqType:%x\n    req: %x\n    val: %04x\n    idx: %d\n    wLength: %d\n    bl: %zu\n",
-//                                 cmd.u.submit.setup[0],
-//                                 cmd.u.submit.setup[1],
-//                                 (cmd.u.submit.setup[3] << 8) + cmd.u.submit.setup[2],
-//                                 (cmd.u.submit.setup[5] << 8) + cmd.u.submit.setup[4],
-//                                 (cmd.u.submit.setup[7] << 8) + cmd.u.submit.setup[6],
-//                                 bl);
-
-
                         struct avr_io_usb pkt = { ep, sizeof cmd.u.submit.setup, cmd.u.submit.setup };
                         if (avr_ioctl(p->avr, AVR_IOCTL_USB_SETUP, &pkt)) {
                             printf("FATAL: SETUP packet failed!\n");
                         }
-//                         printf("data phase\n");
-                    } else {
-//                         printf("submit\n    flags: %x\n    start_Frame: %d\n    num_of_pkts: %d\n    interval: %d\n    bl: %zu\n",
-//                                 ntohl(cmd.u.submit.transfer_flags),
-//                                 ntohl(cmd.u.submit.start_frame),
-//                                 cmd.u.submit.number_of_packets,
-//                                 cmd.u.submit.interval,
-//                                 bl);
                     }
 
                     if (direction == USBIP_DIR_IN) {
                         if (bl) {
                             bl = avr_usb_read(p, ep, buf, bl);
+                            if (ep==4 && bl < 0) bl = 0; //teensy & linux hack?
                         }
-                        if (ep == 0) {
+                        if (ep == 0)
                             avr_usb_write(p, ep, NULL, 0);
-                        }
                     } else {
                         if (bl && sock_read_exact(sockfd, buf, bl))
                             return;
-                        if (bl) {
-//                             if(ep) printf("ep#%d -> %.*s\n", ep, (int)bl, buf);
+                        if (bl)
                             bl = avr_usb_write(p, ep, buf, bl);
-                        }
-                        if (ep == 0) {
+                        if (ep == 0)
                             avr_usb_read(p, ep, NULL, 0);
-                        }
                     }
 
 

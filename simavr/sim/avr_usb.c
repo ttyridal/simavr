@@ -311,7 +311,6 @@ avr_usb_ep_write_ueintx(
 		curstate->rxouti = 0;
 	if (curstate->txini & !newstate->txini) {
 		curstate->txini = 0;
-        printf("txini! %d bytes\n", ep_fifo_count(epstate));
         pthread_cond_signal(&p->state->cpu_action);
 	}
 	if (curstate->rxstpi & !newstate->rxstpi) {
@@ -520,6 +519,7 @@ avr_usb_ioctl(
 	switch (ctl) {
 		case AVR_IOCTL_USB_READ:
 			ep = d->pipe & 0x7f;
+            if (!ep) printf("read\n");
 			epstate = get_epstate(p, ep);
 
 			if (epstate->ueconx.stallrq) {
@@ -538,9 +538,6 @@ avr_usb_ioctl(
                 return 0;
             }
 
-            epstate->ueintx.fifocon = 1 & (epstate->uecfg0x.eptype != 0);
-            raise_ep_interrupt(io->avr, p, ep, txini);
-
             ret = 0;
             clock_gettime(CLOCK_REALTIME, &ts);
             if (ep)
@@ -553,23 +550,18 @@ avr_usb_ioctl(
 			ret = host_read_ep_fifo(epstate, d->buf, d->sz);
 			pthread_mutex_unlock(&p->state->mutex);
 
-			if (ret < 0) {
-				// is this correct? It makes the cdc example work.
-				// Linux stops polling the data ep if we send naks,but
-				// according to usb spec nak'ing should be ok.
-				if (epstate->uecfg0x.eptype == 2) {
-					d->sz = 0;
-					return 0;
-				} else
-					return ret;
-			}
+			if (ret >= 0) {
+                epstate->ueintx.fifocon = 1 & (epstate->uecfg0x.eptype != 0);
+                raise_ep_interrupt(io->avr, p, ep, txini);
 
-			d->sz = ret;
-			ret = 0;
+                d->sz = ret;
+                ret = 0;
+            }
 
 			return ret;
 		case AVR_IOCTL_USB_WRITE:
 			ep = d->pipe & 0x7f;
+            if (!ep) printf("write\n");
 			epstate = get_epstate(p, ep);
 
 			if (ep && epstate->uecfg0x.epdir)
@@ -593,6 +585,7 @@ avr_usb_ioctl(
 			pthread_mutex_unlock(&p->state->mutex);
 			return 0;
 		case AVR_IOCTL_USB_SETUP:
+            printf("setup\n");
 			ep = d->pipe & 0x7f;
 			epstate = get_epstate(p, ep);
 
@@ -604,7 +597,8 @@ avr_usb_ioctl(
 
             assert(d->buf && d->sz==8);
 
-			ret = host_write_ep_fifo(epstate, d->buf, d->sz);
+            if (d->buf && d->sz)
+                ret = host_write_ep_fifo(epstate, d->buf, d->sz);
 			pthread_mutex_unlock(&p->state->mutex);
 
 			if (ret < 0)
@@ -621,9 +615,11 @@ avr_usb_ioctl(
             if (d->buf[0] & 0x80) { // control READ
                 while (!ret && (epstate->ueintx.rxstpi || epstate->ueintx.txini))
                     ret = pthread_cond_timedwait(&p->state->cpu_action, &p->state->mutex, &ts);
+                epstate->ueintx.txini = 1;
             } else { // control WRITE
-                while (epstate->ueintx.rxstpi && !ret)
+                while (!ret && (epstate->ueintx.rxstpi || epstate->ueintx.txini))
                     ret = pthread_cond_timedwait(&p->state->cpu_action, &p->state->mutex, &ts);
+                //epstate->ueintx.txini = 1;
             }
             pthread_mutex_unlock(&p->state->mutex);
             return ret;
@@ -631,7 +627,7 @@ avr_usb_ioctl(
 			AVR_LOG(io->avr, LOG_TRACE, "USB: __USB_RESET__\n");
 			reset_endpoints(io->avr, p);
 			raise_usb_interrupt(p, eorsti);
-			if (1)
+			if (0)
 				avr_cycle_timer_register_usec(io->avr, 1000, sof_generator, p);
 			return 0;
 		default:
