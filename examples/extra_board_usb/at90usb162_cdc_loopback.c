@@ -641,7 +641,6 @@ void usb_serial_flush_output(void)
 	intr_state = SREG;
 	cli();
 	if (transmit_flush_timer) {
-            printf("avr: force-flush\n");
 		UENUM = CDC_TX_ENDPOINT;
 		UEINTX = 0x3A;
 		transmit_flush_timer = 0;
@@ -746,7 +745,6 @@ ISR(USB_GEN_vect, ISR_BLOCK)
 			if (t) {
 				transmit_flush_timer = --t;
 				if (!t) {
-                                    printf("flush!\n");
 					UENUM = CDC_TX_ENDPOINT;
 					UEINTX = 0x3A;
 				}
@@ -805,7 +803,6 @@ ISR(USB_COM_vect, ISR_BLOCK)
 	UENUM = 0;
 	intbits = UEINTX;
 	if (intbits & (1<<RXSTPI)) {
-            printf("avr: setup\n");
 		bmRequestType = UEDATX;
 		bRequest = UEDATX;
 		wValue = UEDATX;
@@ -814,6 +811,7 @@ ISR(USB_COM_vect, ISR_BLOCK)
 		wIndex |= (UEDATX << 8);
 		wLength = UEDATX;
 		wLength |= (UEDATX << 8);
+        printf("avr: setup %x %x %x\n", bmRequestType, bRequest, wValue);
 		UEINTX = ~((1<<RXSTPI) | (1<<RXOUTI) | (1<<TXINI));
 		if (bRequest == GET_DESCRIPTOR) {
 			list = (const uint8_t *)descriptor_list;
@@ -917,6 +915,7 @@ ISR(USB_COM_vect, ISR_BLOCK)
                             printf("avr: failed wait ready\n");
                             //return;
                         }
+            printf("avr: wait_ok\n");
 			usb_send_in();
 			return;
 		}

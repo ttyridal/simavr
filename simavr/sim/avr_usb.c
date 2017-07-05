@@ -290,6 +290,8 @@ avr_debug_Write(
     printf("%c", v);
 }
 
+static int can_touch_txini = 1;
+
 static void
 avr_usb_ep_write_ueintx(
         struct avr_t * avr,
@@ -300,6 +302,7 @@ avr_usb_ep_write_ueintx(
 	avr_usb_t * p = (avr_usb_t *) param;
 	uint8_t ep = current_ep_to_cpu(p);
     struct _epstate * epstate = get_epstate(p, ep);
+    int signalhost = 0;
 
 	if(pthread_mutex_lock(&p->state->mutex))
 		abort();
@@ -310,12 +313,16 @@ avr_usb_ep_write_ueintx(
 	if (curstate->rxouti & !newstate->rxouti)
 		curstate->rxouti = 0;
 	if (curstate->txini & !newstate->txini) {
-		curstate->txini = 0;
-        pthread_cond_signal(&p->state->cpu_action);
+        if (can_touch_txini) {
+            curstate->txini = 0;
+            signalhost = 1;
+        } else
+            AVR_LOG(avr, LOG_WARNING, "USB: BUG, clearing txini in setup phase\n");
 	}
 	if (curstate->rxstpi & !newstate->rxstpi) {
 		curstate->rxstpi = 0;
-        pthread_cond_signal(&p->state->cpu_action);
+        can_touch_txini = 1;
+        signalhost = 1;
 	}
 	if (curstate->fifocon & !newstate->fifocon)
 		curstate->fifocon = 0;
@@ -332,6 +339,8 @@ avr_usb_ep_write_ueintx(
 		avr->data[p->r_usbcon + ueint] &= 0xff ^ (1 << ep); // mark ep0 interrupt
 
 	pthread_mutex_unlock(&p->state->mutex);
+    if (signalhost)
+        pthread_cond_signal(&p->state->cpu_action);
 }
 
 static uint8_t
@@ -603,10 +612,11 @@ avr_usb_ioctl(
 
 			if (ret < 0)
 				return ret;
-			raise_ep_interrupt(io->avr, p, ep, rxstpi);
 
 			if (pthread_mutex_lock(&p->state->mutex))
 				abort();
+
+			raise_ep_interrupt(io->avr, p, ep, rxstpi);
 
             // wait for cpu to ack setup
             clock_gettime(CLOCK_REALTIME, &ts);
@@ -617,9 +627,12 @@ avr_usb_ioctl(
                     ret = pthread_cond_timedwait(&p->state->cpu_action, &p->state->mutex, &ts);
                 epstate->ueintx.txini = 1;
             } else { // control WRITE
-                while (!ret && (epstate->ueintx.rxstpi || epstate->ueintx.txini))
+                // some implementations, like teensy clear everything on rxstp.. which is wrong
+                // for a ctrl-write.. aparently it's working on real hardware so we ignore txini
+                // changes until stp ack'ed.
+                can_touch_txini = 0;
+                while (!ret && (epstate->ueintx.rxstpi))
                     ret = pthread_cond_timedwait(&p->state->cpu_action, &p->state->mutex, &ts);
-                //epstate->ueintx.txini = 1;
             }
             pthread_mutex_unlock(&p->state->mutex);
             return ret;
@@ -627,7 +640,7 @@ avr_usb_ioctl(
 			AVR_LOG(io->avr, LOG_TRACE, "USB: __USB_RESET__\n");
 			reset_endpoints(io->avr, p);
 			raise_usb_interrupt(p, eorsti);
-			if (0)
+			if (1)
 				avr_cycle_timer_register_usec(io->avr, 1000, sof_generator, p);
 			return 0;
 		default:

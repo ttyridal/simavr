@@ -457,8 +457,9 @@ handle_usbip_connection(
 
 
                     struct usbip_header ret;
-                    ret.hdr = cmd.hdr;
+                    memset(&ret, 0, sizeof ret);
                     ret.hdr.command = htonl(USBIP_RET_SUBMIT);
+                    ret.hdr.seqnum = cmd.hdr.seqnum;
                     ret.u.retsubmit.status = htonl(bl < 0 ? USBIP_ST_NA : USBIP_ST_OK);
                     ret.u.retsubmit.actual_length = htonl(bl < 0 ? 0 : bl);
                     ret.u.retsubmit.start_frame = 0;

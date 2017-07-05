@@ -5,6 +5,7 @@ import socket
 import struct
 import binascii
 import sys
+import time
 
 USBIP_ST_OK = 0
 USBIP_ST_NAK = 1
@@ -83,7 +84,10 @@ def do_setup(s, ret, setup, data):
 
 
 def go_import(s):
-    sendok=0
+    lastin=time.clock() + 0.001
+    innaks=0
+
+    rxbuf=bytearray()
     while 1:
         b = s.recv(MsgSize)
         if b == b'':
@@ -105,9 +109,9 @@ def go_import(s):
             CmdHdr_s.pack_into(ret, 0,
                 USBIP_RET_SUBMIT,
                 cmd.seqnum,
-                cmd.devid,
-                cmd.direction,
-                cmd.ep)
+                0,
+                0,
+                0)
 
             if cmd.ep == 0:
                 Setup = namedtuple("Setup", "reqtype req val idx len")
@@ -123,21 +127,25 @@ def go_import(s):
             elif cmd.ep == 2: #interrupt endpoint
                 CmdSubmitRet_s.pack_into(ret, CmdHdr_s.size, USBIP_ST_NAK, 0, 0, 0, 0)
                 s.send(ret)
-            elif cmd.ep == 3:
-                print(repr(data))
-                if data[0] == 13:
-                    print("will send ok next")
-                    sendok+=1
+            elif cmd.ep == 3: #bulk OUT
+                print('OUT:',repr(data))
+                rxbuf.extend(data)
                 CmdSubmitRet_s.pack_into(ret, CmdHdr_s.size, USBIP_ST_OK, 0, 0, 0, 0)
                 s.send(ret)
-            elif cmd.ep == 4:
-                if sendok:
-                    print("sending ok")
-                    sendok -= 1
-                    CmdSubmitRet_s.pack_into(ret, CmdHdr_s.size, USBIP_ST_OK, 4, 0, 0, 0)
-                    s.send(ret + b'OK\r\n')
-                else:
+            elif cmd.ep == 4: #bulk IN
+                ts = time.clock()
+                if len(rxbuf):
+                    print('IN:',repr(rxbuf))
+                    CmdSubmitRet_s.pack_into(ret, CmdHdr_s.size, USBIP_ST_OK, len(rxbuf), 0, 0, 0)
+                    s.send(ret + rxbuf)
+                    rxbuf = bytearray()
+                    lastin = ts
+                    innaks = 0
+                elif ts > lastin+0.001:
                     CmdSubmitRet_s.pack_into(ret, CmdHdr_s.size, USBIP_ST_OK, 0, 0, 0, 0)
+                    s.send(ret)
+                else:
+                    CmdSubmitRet_s.pack_into(ret, CmdHdr_s.size, USBIP_ST_NAK, 0, 0, 0, 0)
                     s.send(ret)
             else:
                 print("NAKing ep %d %s" % (cmd.ep, "IN" if cmd.direction else "OUT"))

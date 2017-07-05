@@ -46,12 +46,12 @@ def usbip_submit_out(s, setuppkt=None, ep=0, dta = b""):
         raise USBIPError("Response is not sumbmit return")
     if x[1] != 1:
         raise USBIPError("Sequence number wrong")
-    if x[2] != 0x10002:
-        raise USBIPError("Device id wrong")
-    if x[3] != direction:
-        raise USBIPError("Direction bit is wrong")
-    if x[4] != ep:
-        raise USBIPError("Endpoint# is wrong")
+##     if x[2] != 0:
+##         raise USBIPError("Device id wrong")
+##     if x[3] != 0:
+##         raise USBIPError("Direction bit is wrong")
+##     if x[4] != ep:
+##         raise USBIPError("Endpoint# is wrong")
     if x[6] != 0:
         raise USBIPError("Unexpected non-zero buffer length")
     if x[5] != 0:
@@ -76,12 +76,12 @@ def usbip_submit_in(s, setuppkt=None, ep=0, maxsz=0):
         raise USBIPError("Response is not sumbmit return")
     if x[1] != 1:
         raise USBIPError("Sequence number wrong")
-    if x[2] != 0x10002:
-        raise USBIPError("Device id wrong")
-    if x[3] != direction:
-        raise USBIPError("Direction bit is wrong")
-    if x[4] != ep:
-        raise USBIPError("Endpoint# is wrong")
+##     if x[2] != 0:
+##         raise USBIPError("Device id wrong")
+##     if x[3] != 0:
+##         raise USBIPError("Direction bit is wrong")
+##     if x[4] != 0:
+##         raise USBIPError("Endpoint# is wrong")
     if x[5] != 0:
         raise USBNak()
     return s.recv(x[6])
@@ -181,27 +181,14 @@ class TestStuff(unittest.TestCase):
         print("write_bulk")
         max_retry = 2
         for retry in range(max_retry + 1):
-            direct = 0
-            s.send(struct.pack("!IIIIIIiiii",
-                USBIP_CMD_SUBMIT, 1, 0x10002, direct, ep,
-                0x200, len(dta), 0, 0, 0) +
-                struct.pack("BBHHH", 0, 0, 0, 0, 0) + dta
-            )
-            X = struct.Struct("!IIIIIIiiiixxxxxxxx")
-            x = X.unpack(s.recv(X.size))
-
-            if (x[5] == 1 and retry < max_retry): # write naked
-                time.sleep(0.1)
-                continue
-
-            self.assertEqual(x[0], 3)
-            self.assertEqual(x[1], 1, 'seqnum')
-            self.assertEqual(x[2], 0x10002)
-            self.assertEqual(x[3], direct, "direction")
-            self.assertEqual(x[4], ep, "ep")
-
-            self.assertEqual(x[5], 0, 'status')
-            self.assertEqual(x[6], 0, 'length')
+            try:
+                usbip_submit_out(s, ep=ep, dta=dta)
+            except USBNak:
+                if retry < max_retry:
+                    time.sleep(0.05)
+                    continue
+                else:
+                    raise
             break
 
     def read_bulk(self, s, ep=4, expectNak=False):
@@ -215,13 +202,14 @@ class TestStuff(unittest.TestCase):
             else:
                 try:
                     dta = usbip_submit_in(s, ep=ep, maxsz=64)
+                    if dta == b'':
+                        raise USBNak
                 except USBNak:
                     if retry < max_retry:
                         time.sleep(0.05)
                         continue
                     else:
                         self.assertTrue(False, "expected data but none arrived")
-                        raise
                 self.assertEqual(dta, b'H')
             break
 
@@ -243,8 +231,6 @@ class TestStuff(unittest.TestCase):
             time.sleep(0.1)
 
             self.set_line_coding(s)
-
-            self.read_bulk(s, expectNak=True)
 
             for x in range(10):
                 self.poll_int_ep(s)
